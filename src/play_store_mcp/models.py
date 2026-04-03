@@ -248,3 +248,145 @@ class ValidationError(BaseModel):
     field: str = Field(..., description="Field that failed validation")
     message: str = Field(..., description="Error message")
     value: Any | None = Field(None, description="Invalid value")
+
+
+# =============================================================================
+# Images API Models
+# =============================================================================
+
+
+class ImageInfo(BaseModel):
+    """Store listing image information."""
+
+    image_id: str = Field(..., description="Image ID")
+    url: str = Field(..., description="Image URL")
+    sha1: str | None = Field(None, description="SHA1 hash of image")
+    sha256: str | None = Field(None, description="SHA256 hash of image")
+
+
+class ImageUploadResult(BaseModel):
+    """Result of an image upload or delete operation."""
+
+    success: bool = Field(..., description="Whether operation succeeded")
+    package_name: str = Field(..., description="App package name")
+    language: str = Field(..., description="Language code")
+    image_type: str = Field(..., description="Image type")
+    image_id: str | None = Field(None, description="Image ID (for upload)")
+    message: str = Field(..., description="Status message")
+    error: str | None = Field(None, description="Error details if failed")
+
+
+# =============================================================================
+# App Details Models
+# =============================================================================
+
+
+class AppDetailsInfo(BaseModel):
+    """App details from edits.details API."""
+
+    package_name: str = Field(..., description="App package name")
+    default_language: str | None = Field(None, description="Default language code")
+    contact_email: str | None = Field(None, description="Developer contact email")
+    contact_phone: str | None = Field(None, description="Developer contact phone")
+    contact_website: str | None = Field(None, description="Developer contact website")
+
+
+class AppDetailsUpdateResult(BaseModel):
+    """Result of updating app details."""
+
+    success: bool = Field(..., description="Whether update succeeded")
+    package_name: str = Field(..., description="App package name")
+    message: str = Field(..., description="Status message")
+    error: str | None = Field(None, description="Error details if failed")
+
+
+# =============================================================================
+# Country Availability Models
+# =============================================================================
+
+
+class CountryAvailability(BaseModel):
+    """Country availability for a release track."""
+
+    package_name: str = Field(..., description="App package name")
+    track: str = Field(..., description="Release track")
+    countries: list[str] = Field(default_factory=list, description="List of country codes")
+    rest_of_world: bool = Field(False, description="Whether available in rest of world")
+
+
+# =============================================================================
+# Users & Grants Models
+# =============================================================================
+
+
+class GrantInfo(BaseModel):
+    """App-level grant for a user."""
+
+    package_name: str = Field(..., description="App package name")
+    app_level_permissions: list[str] = Field(
+        default_factory=list, description="App-level permissions granted"
+    )
+
+
+class UserInfo(BaseModel):
+    """Developer account user information."""
+
+    name: str | None = Field(None, description="Resource name of user")
+    email: str = Field(..., description="User email address")
+    access_state: str | None = Field(None, description="Account-level access state")
+    grants: list[GrantInfo] = Field(default_factory=list, description="App-level grants")
+
+
+class UserOperationResult(BaseModel):
+    """Result of a user or grant operation."""
+
+    success: bool = Field(..., description="Whether operation succeeded")
+    email: str = Field(..., description="User email address")
+    message: str = Field(..., description="Status message")
+    error: str | None = Field(None, description="Error details if failed")
+
+
+# =============================================================================
+# Orders & Purchases Models
+# =============================================================================
+
+
+class RefundResult(BaseModel):
+    """Result of an order refund operation."""
+
+    success: bool = Field(..., description="Whether refund succeeded")
+    order_id: str = Field(..., description="Order ID")
+    package_name: str = Field(..., description="App package name")
+    revoked: bool = Field(False, description="Whether entitlement was revoked")
+    message: str = Field(..., description="Status message")
+    error: str | None = Field(None, description="Error details if failed")
+
+
+class ProductPurchase(BaseModel):
+    """One-time in-app product purchase status."""
+
+    package_name: str = Field(..., description="App package name")
+    product_id: str = Field(..., description="Product ID")
+    purchase_token: str = Field(..., description="Purchase token")
+    purchase_time: datetime | None = Field(None, description="Purchase time")
+    purchase_state: int | None = Field(None, description="0=purchased, 1=canceled, 2=pending")
+    consumption_state: int | None = Field(None, description="0=not consumed, 1=consumed")
+    developer_payload: str | None = Field(None, description="Developer payload")
+    order_id: str | None = Field(None, description="Order ID")
+    acknowledged: bool = Field(False, description="Whether purchase was acknowledged")
+    quantity: int | None = Field(None, description="Purchase quantity")
+
+
+class SubscriptionPurchaseV2(BaseModel):
+    """Subscription purchase status (v2 API)."""
+
+    package_name: str = Field(..., description="App package name")
+    purchase_token: str = Field(..., description="Purchase token")
+    subscription_state: str | None = Field(None, description="Subscription state")
+    latest_order_id: str | None = Field(None, description="Latest order ID")
+    start_time: datetime | None = Field(None, description="Subscription start time")
+    expiry_time: datetime | None = Field(None, description="Current period expiry time")
+    auto_renewing: bool = Field(False, description="Whether auto-renewing")
+    product_id: str | None = Field(None, description="Subscription product ID")
+    base_plan_id: str | None = Field(None, description="Base plan ID")
+    offer_id: str | None = Field(None, description="Offer ID if applicable")

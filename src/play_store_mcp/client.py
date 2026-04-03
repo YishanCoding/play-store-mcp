@@ -18,21 +18,32 @@ from googleapiclient.http import MediaFileUpload
 
 from play_store_mcp.models import (
     AppDetails,
+    AppDetailsInfo,
+    AppDetailsUpdateResult,
     AppInfo,
     BatchDeploymentResult,
+    CountryAvailability,
     DeploymentResult,
     ExpansionFile,
+    GrantInfo,
+    ImageInfo,
+    ImageUploadResult,
     InAppProduct,
     Listing,
     ListingUpdateResult,
     Order,
+    ProductPurchase,
+    RefundResult,
     Release,
     Review,
     ReviewReplyResult,
     SubscriptionProduct,
     SubscriptionPurchase,
+    SubscriptionPurchaseV2,
     TesterInfo,
     TrackInfo,
+    UserInfo,
+    UserOperationResult,
     ValidationError,
     VitalsMetric,
     VitalsOverview,
@@ -1524,10 +1535,10 @@ class PlayStoreClient:
             )
 
             listings: list[Listing] = []
-            for lang, listing_data in result.get("listings", {}).items():
+            for listing_data in result.get("listings", []):
                 listings.append(
                     Listing(
-                        language=lang,
+                        language=listing_data.get("language", ""),
                         title=listing_data.get("title"),
                         full_description=listing_data.get("fullDescription"),
                         short_description=listing_data.get("shortDescription"),
@@ -1565,9 +1576,11 @@ class PlayStoreClient:
                 .execute()
             )
 
+            individual_emails: list[str] = testers_data.get("testers", [])
+            group_emails: list[str] = testers_data.get("googleGroups", [])
             return TesterInfo(
                 track=track,
-                tester_emails=testers_data.get("googleGroups", []),
+                tester_emails=individual_emails + group_emails,
             )
         except HttpError as e:
             if e.resp.status == 404:
@@ -1722,3 +1735,947 @@ class PlayStoreClient:
             raise PlayStoreClientError(f"Failed to get expansion file: {e.reason}") from e
         finally:
             self._delete_edit(package_name, edit_id)
+
+    # =========================================================================
+    # Images API
+    # =========================================================================
+
+    def list_images(
+        self,
+        package_name: str,
+        language: str,
+        image_type: str,
+    ) -> list[ImageInfo]:
+        """List store listing images of a given type and language.
+
+        Args:
+            package_name: App package name.
+            language: Language code (e.g., en-US).
+            image_type: One of: phoneScreenshots, sevenInchScreenshots,
+                        tenInchScreenshots, tvScreenshots, wearScreenshots,
+                        icon, featureGraphic, tvBanner, promoGraphic.
+
+        Returns:
+            List of image info objects.
+        """
+        self._logger.info(
+            "Listing images",
+            package_name=package_name,
+            language=language,
+            image_type=image_type,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            result = (
+                service.edits()
+                .images()
+                .list(
+                    packageName=package_name,
+                    editId=edit_id,
+                    language=language,
+                    imageType=image_type,
+                )
+                .execute()
+            )
+
+            return [
+                ImageInfo(
+                    image_id=img["id"],
+                    url=img.get("url", ""),
+                    sha1=img.get("sha1"),
+                    sha256=img.get("sha256"),
+                )
+                for img in result.get("images", [])
+            ]
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def upload_image(
+        self,
+        package_name: str,
+        language: str,
+        image_type: str,
+        file_path: str,
+    ) -> ImageUploadResult:
+        """Upload a store listing image.
+
+        Args:
+            package_name: App package name.
+            language: Language code (e.g., en-US).
+            image_type: Image type (e.g., phoneScreenshots, icon, featureGraphic).
+            file_path: Absolute path to the image file (PNG or JPEG).
+
+        Returns:
+            Upload result with image ID.
+        """
+        self._logger.info(
+            "Uploading image",
+            package_name=package_name,
+            language=language,
+            image_type=image_type,
+            file_path=file_path,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            media = MediaFileUpload(file_path, resumable=True)
+            result = (
+                service.edits()
+                .images()
+                .upload(
+                    packageName=package_name,
+                    editId=edit_id,
+                    language=language,
+                    imageType=image_type,
+                    media_body=media,
+                )
+                .execute()
+            )
+
+            self._commit_edit(package_name, edit_id)
+            img = result.get("image", {})
+            return ImageUploadResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                image_id=img.get("id"),
+                message=f"Successfully uploaded {image_type} image for {language}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to upload image", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return ImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                message=f"Failed to upload image: {e.reason}",
+                error=str(e),
+            )
+        except Exception as e:
+            self._logger.exception("Failed to upload image", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return ImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                message=f"Failed to upload image: {e}",
+                error=str(e),
+            )
+
+    def delete_image(
+        self,
+        package_name: str,
+        language: str,
+        image_type: str,
+        image_id: str,
+    ) -> ImageUploadResult:
+        """Delete a specific store listing image.
+
+        Args:
+            package_name: App package name.
+            language: Language code (e.g., en-US).
+            image_type: Image type.
+            image_id: ID of the image to delete.
+
+        Returns:
+            Delete result.
+        """
+        self._logger.info(
+            "Deleting image",
+            package_name=package_name,
+            language=language,
+            image_type=image_type,
+            image_id=image_id,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            service.edits().images().delete(
+                packageName=package_name,
+                editId=edit_id,
+                language=language,
+                imageType=image_type,
+                imageId=image_id,
+            ).execute()
+
+            self._commit_edit(package_name, edit_id)
+            return ImageUploadResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                image_id=image_id,
+                message=f"Successfully deleted image {image_id}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to delete image", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return ImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                message=f"Failed to delete image: {e.reason}",
+                error=str(e),
+            )
+
+    def delete_all_images(
+        self,
+        package_name: str,
+        language: str,
+        image_type: str,
+    ) -> ImageUploadResult:
+        """Delete all store listing images of a given type and language.
+
+        Args:
+            package_name: App package name.
+            language: Language code (e.g., en-US).
+            image_type: Image type to clear.
+
+        Returns:
+            Delete result.
+        """
+        self._logger.info(
+            "Deleting all images",
+            package_name=package_name,
+            language=language,
+            image_type=image_type,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            service.edits().images().deleteall(
+                packageName=package_name,
+                editId=edit_id,
+                language=language,
+                imageType=image_type,
+            ).execute()
+
+            self._commit_edit(package_name, edit_id)
+            return ImageUploadResult(
+                success=True,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                message=f"Successfully deleted all {image_type} images for {language}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to delete all images", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return ImageUploadResult(
+                success=False,
+                package_name=package_name,
+                language=language,
+                image_type=image_type,
+                message=f"Failed to delete all images: {e.reason}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # App Details API (edits.details)
+    # =========================================================================
+
+    def get_app_details_info(self, package_name: str) -> AppDetailsInfo:
+        """Get app details including default language and contact info.
+
+        Args:
+            package_name: App package name.
+
+        Returns:
+            App details info.
+        """
+        self._logger.info("Getting app details", package_name=package_name)
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            result = (
+                service.edits()
+                .details()
+                .get(packageName=package_name, editId=edit_id)
+                .execute()
+            )
+
+            return AppDetailsInfo(
+                package_name=package_name,
+                default_language=result.get("defaultLanguage"),
+                contact_email=result.get("contactEmail"),
+                contact_phone=result.get("contactPhone"),
+                contact_website=result.get("contactWebsite"),
+            )
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def update_app_details_info(
+        self,
+        package_name: str,
+        default_language: str | None = None,
+        contact_email: str | None = None,
+        contact_phone: str | None = None,
+        contact_website: str | None = None,
+    ) -> AppDetailsUpdateResult:
+        """Update app details such as default language and contact info.
+
+        Args:
+            package_name: App package name.
+            default_language: Default language code (e.g., en-US).
+            contact_email: Developer contact email.
+            contact_phone: Developer contact phone.
+            contact_website: Developer contact website.
+
+        Returns:
+            Update result.
+        """
+        self._logger.info("Updating app details", package_name=package_name)
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            current = (
+                service.edits()
+                .details()
+                .get(packageName=package_name, editId=edit_id)
+                .execute()
+            )
+
+            body = {
+                "defaultLanguage": default_language or current.get("defaultLanguage"),
+                "contactEmail": contact_email if contact_email is not None else current.get("contactEmail"),
+                "contactPhone": contact_phone if contact_phone is not None else current.get("contactPhone"),
+                "contactWebsite": contact_website if contact_website is not None else current.get("contactWebsite"),
+            }
+
+            service.edits().details().update(
+                packageName=package_name,
+                editId=edit_id,
+                body=body,
+            ).execute()
+
+            self._commit_edit(package_name, edit_id)
+            return AppDetailsUpdateResult(
+                success=True,
+                package_name=package_name,
+                message="Successfully updated app details",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to update app details", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return AppDetailsUpdateResult(
+                success=False,
+                package_name=package_name,
+                message=f"Failed to update app details: {e.reason}",
+                error=str(e),
+            )
+        except Exception as e:
+            self._logger.exception("Failed to update app details", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return AppDetailsUpdateResult(
+                success=False,
+                package_name=package_name,
+                message=f"Failed to update app details: {e}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Country Availability API (edits.countryavailability)
+    # =========================================================================
+
+    def get_country_availability(
+        self,
+        package_name: str,
+        track: str,
+    ) -> CountryAvailability:
+        """Get country availability for a release track.
+
+        Args:
+            package_name: App package name.
+            track: Track name (internal, alpha, beta, production).
+
+        Returns:
+            Country availability information.
+        """
+        self._logger.info(
+            "Getting country availability",
+            package_name=package_name,
+            track=track,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            result = (
+                service.edits()
+                .countryavailability()
+                .get(packageName=package_name, editId=edit_id, track=track)
+                .execute()
+            )
+
+            countries = [
+                c.get("countryCode", "")
+                for c in result.get("countries", [])
+            ]
+            return CountryAvailability(
+                package_name=package_name,
+                track=track,
+                countries=countries,
+                rest_of_world=result.get("restOfWorld", False),
+            )
+        except HttpError as e:
+            if e.resp.status == 404:
+                return CountryAvailability(package_name=package_name, track=track)
+            raise PlayStoreClientError(f"Failed to get country availability: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    # =========================================================================
+    # Users API
+    # =========================================================================
+
+    def list_users(self, developer_id: str) -> list[UserInfo]:
+        """List all users in a developer account.
+
+        Args:
+            developer_id: Developer account ID (numeric, from Play Console URL).
+
+        Returns:
+            List of user info objects.
+        """
+        self._logger.info("Listing users", developer_id=developer_id)
+        service = self._get_service()
+
+        try:
+            result = service.users().list(
+                parent=f"developers/{developer_id}"
+            ).execute()
+
+            users = []
+            for u in result.get("users", []):
+                grants = [
+                    GrantInfo(
+                        package_name=g.get("packageName", ""),
+                        app_level_permissions=g.get("appLevelPermissions", []),
+                    )
+                    for g in u.get("grants", [])
+                ]
+                users.append(
+                    UserInfo(
+                        name=u.get("name"),
+                        email=u.get("email", ""),
+                        access_state=u.get("accessState"),
+                        grants=grants,
+                    )
+                )
+            return users
+
+        except HttpError as e:
+            raise PlayStoreClientError(f"Failed to list users: {e.reason}") from e
+
+    def create_user(
+        self,
+        developer_id: str,
+        email: str,
+        access_state: str = "accessGranted",
+    ) -> UserOperationResult:
+        """Add a user to the developer account.
+
+        Args:
+            developer_id: Developer account ID.
+            email: User email address.
+            access_state: Account-level access state. One of:
+                          accessGranted, accessExpired, accessRevoked.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info(
+            "Creating user",
+            developer_id=developer_id,
+            email=email,
+            access_state=access_state,
+        )
+        service = self._get_service()
+
+        try:
+            service.users().create(
+                parent=f"developers/{developer_id}",
+                body={"email": email, "accessState": access_state},
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email=email,
+                message=f"Successfully added user {email}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to create user", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email=email,
+                message=f"Failed to add user: {e.reason}",
+                error=str(e),
+            )
+
+    def delete_user(
+        self,
+        developer_id: str,
+        email: str,
+    ) -> UserOperationResult:
+        """Remove a user from the developer account.
+
+        Args:
+            developer_id: Developer account ID.
+            email: User email address to remove.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info("Deleting user", developer_id=developer_id, email=email)
+        service = self._get_service()
+
+        try:
+            service.users().delete(
+                name=f"developers/{developer_id}/users/{email}"
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email=email,
+                message=f"Successfully removed user {email}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to delete user", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email=email,
+                message=f"Failed to remove user: {e.reason}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Grants API
+    # =========================================================================
+
+    def create_grant(
+        self,
+        developer_id: str,
+        email: str,
+        package_name: str,
+        app_level_permissions: list[str],
+    ) -> UserOperationResult:
+        """Grant a user app-level permissions.
+
+        Args:
+            developer_id: Developer account ID.
+            email: User email address.
+            package_name: App package name to grant access to.
+            app_level_permissions: List of permissions to grant. Valid values include:
+                canAccessStats, canManageProductionRelease, canManageTestTracks,
+                canManageStorePresence, canReplyToReviews.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info(
+            "Creating grant",
+            developer_id=developer_id,
+            email=email,
+            package_name=package_name,
+        )
+        service = self._get_service()
+
+        try:
+            service.grants().create(
+                parent=f"developers/{developer_id}/users/{email}",
+                body={
+                    "packageName": package_name,
+                    "appLevelPermissions": app_level_permissions,
+                },
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email=email,
+                message=f"Successfully granted permissions on {package_name} to {email}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to create grant", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email=email,
+                message=f"Failed to create grant: {e.reason}",
+                error=str(e),
+            )
+
+    def delete_grant(
+        self,
+        developer_id: str,
+        email: str,
+        package_name: str,
+    ) -> UserOperationResult:
+        """Revoke a user's app-level permissions.
+
+        Args:
+            developer_id: Developer account ID.
+            email: User email address.
+            package_name: App package name to revoke access from.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info(
+            "Deleting grant",
+            developer_id=developer_id,
+            email=email,
+            package_name=package_name,
+        )
+        service = self._get_service()
+
+        try:
+            service.grants().delete(
+                name=f"developers/{developer_id}/users/{email}/grants/{package_name}"
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email=email,
+                message=f"Successfully revoked permissions on {package_name} from {email}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to delete grant", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email=email,
+                message=f"Failed to revoke grant: {e.reason}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Orders Refund API
+    # =========================================================================
+
+    def refund_order(
+        self,
+        package_name: str,
+        order_id: str,
+        revoke: bool = False,
+    ) -> RefundResult:
+        """Refund an order.
+
+        Args:
+            package_name: App package name.
+            order_id: Order ID to refund.
+            revoke: If True, also revokes the user's entitlement to the purchase.
+
+        Returns:
+            Refund result.
+        """
+        self._logger.info(
+            "Refunding order",
+            package_name=package_name,
+            order_id=order_id,
+            revoke=revoke,
+        )
+        service = self._get_service()
+
+        try:
+            service.orders().refund(
+                packageName=package_name,
+                orderId=order_id,
+                revoke=revoke,
+            ).execute()
+
+            return RefundResult(
+                success=True,
+                order_id=order_id,
+                package_name=package_name,
+                revoked=revoke,
+                message=f"Successfully refunded order {order_id}"
+                + (" and revoked entitlement" if revoke else ""),
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to refund order", error=str(e))
+            return RefundResult(
+                success=False,
+                order_id=order_id,
+                package_name=package_name,
+                message=f"Failed to refund order: {e.reason}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Purchases - Products (one-time in-app purchases)
+    # =========================================================================
+
+    def get_product_purchase(
+        self,
+        package_name: str,
+        product_id: str,
+        token: str,
+    ) -> ProductPurchase:
+        """Get the status of a one-time in-app product purchase.
+
+        Args:
+            package_name: App package name.
+            product_id: Product SKU.
+            token: Purchase token from the client.
+
+        Returns:
+            Product purchase status.
+        """
+        self._logger.info(
+            "Getting product purchase",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+
+        try:
+            result = (
+                service.purchases()
+                .products()
+                .get(
+                    packageName=package_name,
+                    productId=product_id,
+                    token=token,
+                )
+                .execute()
+            )
+
+            purchase_time_ms = result.get("purchaseTimeMillis")
+            from datetime import datetime, timezone
+            purchase_time = (
+                datetime.fromtimestamp(int(purchase_time_ms) / 1000, tz=timezone.utc)
+                if purchase_time_ms
+                else None
+            )
+
+            return ProductPurchase(
+                package_name=package_name,
+                product_id=product_id,
+                purchase_token=token,
+                purchase_time=purchase_time,
+                purchase_state=result.get("purchaseState"),
+                consumption_state=result.get("consumptionState"),
+                developer_payload=result.get("developerPayload"),
+                order_id=result.get("orderId"),
+                acknowledged=bool(result.get("acknowledgementState", 0)),
+                quantity=result.get("quantity"),
+            )
+
+        except HttpError as e:
+            raise PlayStoreClientError(f"Failed to get product purchase: {e.reason}") from e
+
+    def acknowledge_product_purchase(
+        self,
+        package_name: str,
+        product_id: str,
+        token: str,
+        developer_payload: str = "",
+    ) -> UserOperationResult:
+        """Acknowledge a one-time in-app product purchase.
+
+        Must be called within 3 days of purchase, or the purchase will be reversed.
+
+        Args:
+            package_name: App package name.
+            product_id: Product SKU.
+            token: Purchase token from the client.
+            developer_payload: Optional developer payload string.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info(
+            "Acknowledging product purchase",
+            package_name=package_name,
+            product_id=product_id,
+        )
+        service = self._get_service()
+
+        try:
+            service.purchases().products().acknowledge(
+                packageName=package_name,
+                productId=product_id,
+                token=token,
+                body={"developerPayload": developer_payload},
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email="",
+                message=f"Successfully acknowledged purchase of {product_id}",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to acknowledge purchase", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email="",
+                message=f"Failed to acknowledge purchase: {e.reason}",
+                error=str(e),
+            )
+
+    # =========================================================================
+    # Purchases - Subscriptions v2
+    # =========================================================================
+
+    def get_subscription_purchase_v2(
+        self,
+        package_name: str,
+        token: str,
+    ) -> SubscriptionPurchaseV2:
+        """Get subscription purchase details using the v2 API.
+
+        Args:
+            package_name: App package name.
+            token: Purchase token from the client.
+
+        Returns:
+            Subscription purchase v2 status.
+        """
+        self._logger.info(
+            "Getting subscription purchase v2",
+            package_name=package_name,
+        )
+        service = self._get_service()
+
+        try:
+            result = (
+                service.purchases()
+                .subscriptionsv2()
+                .get(packageName=package_name, token=token)
+                .execute()
+            )
+
+            from datetime import datetime, timezone
+
+            def parse_time(ts: str | None) -> datetime | None:
+                if not ts:
+                    return None
+                try:
+                    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+
+            line_items = result.get("lineItems", [])
+            first_item = line_items[0] if line_items else {}
+
+            return SubscriptionPurchaseV2(
+                package_name=package_name,
+                purchase_token=token,
+                subscription_state=result.get("subscriptionState"),
+                latest_order_id=result.get("latestOrderId"),
+                start_time=parse_time(result.get("startTime")),
+                expiry_time=parse_time(first_item.get("expiryTime")),
+                auto_renewing=result.get("cancelSurveyResult") is None
+                and result.get("subscriptionState") == "SUBSCRIPTION_STATE_ACTIVE",
+                product_id=first_item.get("productId"),
+                base_plan_id=first_item.get("offerDetails", {}).get("basePlanId"),
+                offer_id=first_item.get("offerDetails", {}).get("offerId"),
+            )
+
+        except HttpError as e:
+            raise PlayStoreClientError(
+                f"Failed to get subscription purchase v2: {e.reason}"
+            ) from e
+
+    def cancel_subscription_v2(
+        self,
+        package_name: str,
+        token: str,
+    ) -> UserOperationResult:
+        """Cancel a subscription using the v2 API.
+
+        Args:
+            package_name: App package name.
+            token: Purchase token from the client.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info(
+            "Canceling subscription v2",
+            package_name=package_name,
+        )
+        service = self._get_service()
+
+        try:
+            service.purchases().subscriptionsv2().cancel(
+                packageName=package_name,
+                token=token,
+                body={},
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email="",
+                message="Successfully canceled subscription",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to cancel subscription", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email="",
+                message=f"Failed to cancel subscription: {e.reason}",
+                error=str(e),
+            )
+
+    def revoke_subscription_v2(
+        self,
+        package_name: str,
+        token: str,
+    ) -> UserOperationResult:
+        """Revoke a subscription using the v2 API (cancels and immediately expires).
+
+        Args:
+            package_name: App package name.
+            token: Purchase token from the client.
+
+        Returns:
+            Operation result.
+        """
+        self._logger.info(
+            "Revoking subscription v2",
+            package_name=package_name,
+        )
+        service = self._get_service()
+
+        try:
+            service.purchases().subscriptionsv2().revoke(
+                packageName=package_name,
+                token=token,
+                body={},
+            ).execute()
+
+            return UserOperationResult(
+                success=True,
+                email="",
+                message="Successfully revoked subscription",
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to revoke subscription", error=str(e))
+            return UserOperationResult(
+                success=False,
+                email="",
+                message=f"Failed to revoke subscription: {e.reason}",
+                error=str(e),
+            )

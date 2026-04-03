@@ -960,6 +960,478 @@ async def update_credentials(request: Request) -> JSONResponse:
 
 
 # =============================================================================
+# Images Tools
+# =============================================================================
+
+
+@mcp.tool()
+def list_images(
+    package_name: str,
+    language: str,
+    image_type: str,
+) -> list[dict[str, Any]]:
+    """List store listing images for a given language and image type.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        language: Language code (e.g., en-US)
+        image_type: One of: phoneScreenshots, sevenInchScreenshots,
+                    tenInchScreenshots, tvScreenshots, wearScreenshots,
+                    icon, featureGraphic, tvBanner, promoGraphic
+
+    Returns:
+        List of images with id, url, sha1, sha256
+    """
+    client = get_client_from_context()
+    results = client.list_images(package_name=package_name, language=language, image_type=image_type)
+    return [r.model_dump() for r in results]
+
+
+@mcp.tool()
+def upload_image(
+    package_name: str,
+    language: str,
+    image_type: str,
+    file_path: str,
+) -> dict[str, Any]:
+    """Upload a store listing image (screenshot, icon, feature graphic, etc.).
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        language: Language code (e.g., en-US)
+        image_type: One of: phoneScreenshots, sevenInchScreenshots,
+                    tenInchScreenshots, tvScreenshots, wearScreenshots,
+                    icon, featureGraphic, tvBanner, promoGraphic
+        file_path: Absolute path to the image file (PNG or JPEG)
+
+    Returns:
+        Upload result with success status and image ID
+    """
+    client = get_client_from_context()
+    result = client.upload_image(
+        package_name=package_name,
+        language=language,
+        image_type=image_type,
+        file_path=file_path,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_image(
+    package_name: str,
+    language: str,
+    image_type: str,
+    image_id: str,
+) -> dict[str, Any]:
+    """Delete a specific store listing image by ID.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        language: Language code (e.g., en-US)
+        image_type: Image type (e.g., phoneScreenshots, icon)
+        image_id: ID of the image to delete (from list_images)
+
+    Returns:
+        Delete result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_image(
+        package_name=package_name,
+        language=language,
+        image_type=image_type,
+        image_id=image_id,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_all_images(
+    package_name: str,
+    language: str,
+    image_type: str,
+) -> dict[str, Any]:
+    """Delete all store listing images of a given type and language.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        language: Language code (e.g., en-US)
+        image_type: Image type to clear (e.g., phoneScreenshots, featureGraphic)
+
+    Returns:
+        Delete result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_all_images(
+        package_name=package_name,
+        language=language,
+        image_type=image_type,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# App Details Tools
+# =============================================================================
+
+
+@mcp.tool()
+def get_app_details_info(package_name: str) -> dict[str, Any]:
+    """Get app details including default language and developer contact info.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+
+    Returns:
+        App details with defaultLanguage, contactEmail, contactPhone, contactWebsite
+    """
+    client = get_client_from_context()
+    result = client.get_app_details_info(package_name=package_name)
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_app_details_info(
+    package_name: str,
+    default_language: str | None = None,
+    contact_email: str | None = None,
+    contact_phone: str | None = None,
+    contact_website: str | None = None,
+) -> dict[str, Any]:
+    """Update app details such as default language and developer contact info.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        default_language: Default language code (e.g., en-US, zh-CN)
+        contact_email: Developer contact email shown on Play Store
+        contact_phone: Developer contact phone shown on Play Store
+        contact_website: Developer contact website shown on Play Store
+
+    Returns:
+        Update result with success status
+    """
+    client = get_client_from_context()
+    result = client.update_app_details_info(
+        package_name=package_name,
+        default_language=default_language,
+        contact_email=contact_email,
+        contact_phone=contact_phone,
+        contact_website=contact_website,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Country Availability Tools
+# =============================================================================
+
+
+@mcp.tool()
+def get_country_availability(
+    package_name: str,
+    track: str,
+) -> dict[str, Any]:
+    """Get the list of countries where a release track is available.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        track: Release track - one of: internal, alpha, beta, production
+
+    Returns:
+        Country availability with list of country codes and rest_of_world flag
+    """
+    client = get_client_from_context()
+    result = client.get_country_availability(package_name=package_name, track=track)
+    return result.model_dump()
+
+
+# =============================================================================
+# Users & Grants Tools
+# =============================================================================
+
+
+@mcp.tool()
+def list_users(developer_id: str) -> list[dict[str, Any]]:
+    """List all users in a Google Play developer account.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL,
+                      e.g., the number after 'developers/' in console.play.google.com)
+
+    Returns:
+        List of users with email, access_state, and app-level grants
+    """
+    client = get_client_from_context()
+    results = client.list_users(developer_id=developer_id)
+    return [r.model_dump() for r in results]
+
+
+@mcp.tool()
+def create_user(
+    developer_id: str,
+    email: str,
+    access_state: str = "accessGranted",
+) -> dict[str, Any]:
+    """Add a user to the developer account.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL)
+        email: User's Google account email address
+        access_state: Account-level access. One of:
+                      accessGranted (default), accessExpired, accessRevoked
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.create_user(
+        developer_id=developer_id,
+        email=email,
+        access_state=access_state,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_user(
+    developer_id: str,
+    email: str,
+) -> dict[str, Any]:
+    """Remove a user from the developer account.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL)
+        email: User's Google account email address to remove
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_user(developer_id=developer_id, email=email)
+    return result.model_dump()
+
+
+@mcp.tool()
+def create_grant(
+    developer_id: str,
+    email: str,
+    package_name: str,
+    app_level_permissions: list[str],
+) -> dict[str, Any]:
+    """Grant a user app-level permissions on a specific app.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL)
+        email: User's Google account email address
+        package_name: App package name to grant access to
+        app_level_permissions: List of permissions. Valid values:
+                               canAccessStats, canManageProductionRelease,
+                               canManageTestTracks, canManageStorePresence,
+                               canReplyToReviews
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.create_grant(
+        developer_id=developer_id,
+        email=email,
+        package_name=package_name,
+        app_level_permissions=app_level_permissions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_grant(
+    developer_id: str,
+    email: str,
+    package_name: str,
+) -> dict[str, Any]:
+    """Revoke a user's app-level permissions on a specific app.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL)
+        email: User's Google account email address
+        package_name: App package name to revoke access from
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_grant(
+        developer_id=developer_id,
+        email=email,
+        package_name=package_name,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Orders Refund Tool
+# =============================================================================
+
+
+@mcp.tool()
+def refund_order(
+    package_name: str,
+    order_id: str,
+    revoke: bool = False,
+) -> dict[str, Any]:
+    """Refund a user's order (purchase or subscription).
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        order_id: The order ID to refund
+        revoke: If True, also revokes the user's entitlement to the item.
+                Use with caution - this removes access immediately.
+
+    Returns:
+        Refund result with success status
+    """
+    client = get_client_from_context()
+    result = client.refund_order(
+        package_name=package_name,
+        order_id=order_id,
+        revoke=revoke,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Purchases - Products Tools
+# =============================================================================
+
+
+@mcp.tool()
+def get_product_purchase(
+    package_name: str,
+    product_id: str,
+    token: str,
+) -> dict[str, Any]:
+    """Get the status of a one-time in-app product purchase.
+
+    Use this to verify if a purchase is valid, consumed, or acknowledged.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        product_id: The product SKU (in-app product ID)
+        token: The purchase token returned from the client-side purchase
+
+    Returns:
+        Purchase status including purchase_state (0=purchased, 1=canceled, 2=pending),
+        consumption_state, acknowledged, order_id
+    """
+    client = get_client_from_context()
+    result = client.get_product_purchase(
+        package_name=package_name,
+        product_id=product_id,
+        token=token,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def acknowledge_product_purchase(
+    package_name: str,
+    product_id: str,
+    token: str,
+    developer_payload: str = "",
+) -> dict[str, Any]:
+    """Acknowledge a one-time in-app product purchase.
+
+    Must be called within 3 days of purchase, otherwise the purchase is automatically refunded.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        product_id: The product SKU (in-app product ID)
+        token: The purchase token returned from the client-side purchase
+        developer_payload: Optional string to attach to the purchase (max 100 chars)
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.acknowledge_product_purchase(
+        package_name=package_name,
+        product_id=product_id,
+        token=token,
+        developer_payload=developer_payload,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Purchases - Subscriptions v2 Tools
+# =============================================================================
+
+
+@mcp.tool()
+def get_subscription_purchase_v2(
+    package_name: str,
+    token: str,
+) -> dict[str, Any]:
+    """Get subscription purchase details using the latest v2 API.
+
+    Provides richer subscription state information than the v1 API.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        token: The purchase token returned from the client-side subscription
+
+    Returns:
+        Subscription state including subscription_state, expiry_time,
+        product_id, base_plan_id, offer_id, auto_renewing
+    """
+    client = get_client_from_context()
+    result = client.get_subscription_purchase_v2(
+        package_name=package_name,
+        token=token,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def cancel_subscription_v2(
+    package_name: str,
+    token: str,
+) -> dict[str, Any]:
+    """Cancel a subscription (user keeps access until end of billing period).
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        token: The purchase token of the subscription to cancel
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.cancel_subscription_v2(package_name=package_name, token=token)
+    return result.model_dump()
+
+
+@mcp.tool()
+def revoke_subscription_v2(
+    package_name: str,
+    token: str,
+) -> dict[str, Any]:
+    """Revoke a subscription (cancels AND immediately expires access).
+
+    Use for fraud, abuse, or policy violations. The user loses access immediately.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        token: The purchase token of the subscription to revoke
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.revoke_subscription_v2(package_name=package_name, token=token)
+    return result.model_dump()
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 
