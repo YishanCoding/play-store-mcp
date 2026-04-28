@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,7 +24,10 @@ from play_store_mcp.models import (
     AppInfo,
     BatchDeploymentResult,
     BundleInfo,
+    ConsoleInstallStats,
+    ConsoleStatsResult,
     CountryAvailability,
+    DailyStatPoint,
     DeobfuscationFileResult,
     DeploymentResult,
     ExpansionFile,
@@ -3290,3 +3294,178 @@ class PlayStoreClient:
         except HttpError as e:
             self._logger.exception("Failed to list anomalies", error=str(e))
             raise PlayStoreClientError(f"Failed to list vitals anomalies: {e.reason}") from e
+
+    # =========================================================================
+    # Play Console Browser-Based Stats (requires OpenCLI + logged-in browser)
+    # =========================================================================
+
+    # Metric type mapping (reverse-engineered from Play Console internal API)
+    # These map the URL metric names to the numeric type used in the PA RPC body.
+    _CONSOLE_METRIC_TYPES: dict[str, tuple[int, int]] = {
+        "install_events": (1, 1),   # INSTALL_EVENTS, COUNT
+        "net_installs": (2, 1),     # NET_INSTALLS, COUNT
+        "active_users": (3, 2),     # ACTIVE_USERS, UNIQUE
+    }
+
+    _OPENCLI_BIN = os.path.expanduser("~/.npm-global/bin/opencli")
+
+    def _run_browser_js(self, js: str, timeout: int = 20) -> str:
+        """Run JS in the OpenCLI automation browser and return the result string."""
+        result = subprocess.run(
+            [self._OPENCLI_BIN, "browser", "eval", js],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise PlayStoreClientError(f"opencli browser eval failed: {result.stderr[:200]}")
+        return result.stdout.strip()
+
+    def _fetch_console_time_series(
+        self,
+        developer_id: str,
+        app_id: str,
+        metric_type: int,
+        count_type: int,
+        start_year: int, start_month: int, start_day: int,
+        end_year: int, end_month: int, end_day: int,
+        country_codes: list[str] | None = None,
+    ) -> dict:
+        """Make a statspage/time_series request via the browser (bypasses service-account auth)."""
+        dimensions_js = "[{'1':1}"  # always include overall
+        if country_codes:
+            for cc in country_codes:
+                dimensions_js += f",{{'1':2,'2':'{cc}'}}"
+        dimensions_js += "]"
+
+        js = f"""
+(async function() {{
+  const SAPISID = document.cookie.match(/SAPISID=([^;]+)/)?.[1];
+  if (!SAPISID) return JSON.stringify({{error: 'Not logged into Play Console'}});
+  const ts = Date.now();
+  const msgBuffer = new TextEncoder().encode(ts + ' ' + SAPISID + ' https://play.google.com');
+  const hashBuffer = await crypto.subtle.digest('SHA-1', msgBuffer);
+  const sha1 = Array.from(new Uint8Array(hashBuffer)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  const auth = 'SAPISIDHASH ' + ts + '_' + sha1;
+  const DEV_ID = '{developer_id}';
+  const APP_ID = '{app_id}';
+  const API_KEY = 'AIzaSyBAha_rcoO_aGsmiR5fWbNfdOjqT0gXwbk';
+  const httpHeaders = 'Content-Type:application/json+protobuf\\r\\nX-Goog-AuthUser:0\\r\\nAuthorization:' + auth + '\\r\\nX-Goog-Api-Key:' + API_KEY + '\\r\\n';
+  const url = 'https://playconsolestatsfrontend-pa.clients6.google.com/v1/developers/' + DEV_ID + '/apps/' + APP_ID + '/statspage/time_series?$httpHeaders=' + encodeURIComponent(httpHeaders);
+  const body = JSON.stringify({{'1':{{'1':{{'1':DEV_ID}},'2':{{'1':APP_ID}}}},'2':{{'1':{{'1':{start_year},'2':{start_month},'3':{start_day}}},'2':{{'1':{end_year},'2':{end_month},'3':{end_day}}}}},'4':[{{'1':{{'1':{metric_type},'2':1,'3':{count_type},'4':1}},'2':2}}],'5':1,'7':{{'1':{dimensions_js}}}}});
+  const resp = await fetch(url, {{method:'POST', body:body, credentials:'include'}});
+  const data = await resp.json();
+  return JSON.stringify(data);
+}})()
+"""
+        raw = self._run_browser_js(js)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            raise PlayStoreClientError(f"Invalid JSON from browser stats: {raw[:200]}")
+
+    def _parse_console_series(
+        self,
+        data: dict,
+        metric_name: str,
+        dim_index: int = 0,
+        country_code: str = "overall",
+    ) -> ConsoleStatsResult:
+        """Parse a statspage/time_series response into ConsoleStatsResult."""
+        series_list = data.get("1", [])
+        if dim_index >= len(series_list):
+            return ConsoleStatsResult(metric=metric_name, dimension=country_code, total=0)
+
+        series = series_list[dim_index]
+        points_raw = series.get("4", {}).get("1", [])
+
+        data_points: list[DailyStatPoint] = []
+        total = 0
+        for p in points_raw:
+            val_obj = p.get("2", {})
+            val = int(val_obj.get("2") or val_obj.get("1") or 0)
+            if val == 0:
+                continue
+            date_obj = p.get("4", {})
+            y, m, d = date_obj.get("1", 0), date_obj.get("2", 0), date_obj.get("3", 0)
+            if y and m and d:
+                date_str = f"{y:04d}-{m:02d}-{d:02d}"
+                data_points.append(DailyStatPoint(date=date_str, value=val))
+                total += val
+
+        return ConsoleStatsResult(
+            metric=metric_name,
+            dimension=country_code,
+            total=total,
+            data_points=data_points,
+        )
+
+    def get_install_stats(
+        self,
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+        start_date: str,
+        end_date: str,
+        country_codes: list[str] | None = None,
+    ) -> ConsoleInstallStats:
+        """Get install statistics from Play Console via browser session.
+
+        Requires OpenCLI to be installed and the user to be logged into
+        Play Console (play.google.com/console) in the automation browser.
+
+        developer_id and app_id are the numeric IDs visible in the Play Console
+        URL: /console/u/0/developers/{developer_id}/app/{app_id}/statistics
+
+        Args:
+            package_name: App package name (for display only).
+            developer_id: Numeric developer account ID from Play Console URL.
+            app_id: Numeric app ID from Play Console URL.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+            country_codes: Optional list of country codes (e.g. ['US','GB']) for breakdown.
+
+        Returns:
+            ConsoleInstallStats with install events, net installs, active users,
+            and optional per-country breakdown.
+        """
+        from datetime import date as date_cls
+
+        def parse_date(s: str) -> tuple[int, int, int]:
+            d = date_cls.fromisoformat(s)
+            return d.year, d.month, d.day
+
+        sy, sm, sd = parse_date(start_date)
+        ey, em, ed = parse_date(end_date)
+
+        self._logger.info("Fetching install stats via browser", package_name=package_name)
+
+        # Fetch all three metrics
+        install_data = self._fetch_console_time_series(
+            developer_id, app_id, 1, 1, sy, sm, sd, ey, em, ed, country_codes
+        )
+        net_data = self._fetch_console_time_series(
+            developer_id, app_id, 2, 1, sy, sm, sd, ey, em, ed
+        )
+        active_data = self._fetch_console_time_series(
+            developer_id, app_id, 3, 2, sy, sm, sd, ey, em, ed
+        )
+
+        install_result = self._parse_console_series(install_data, "install_events", 0, "overall")
+        net_result = self._parse_console_series(net_data, "net_installs", 0, "overall")
+        active_result = self._parse_console_series(active_data, "active_users", 0, "overall")
+
+        # Per-country breakdown for install events
+        by_country: list[ConsoleStatsResult] = []
+        if country_codes:
+            for i, cc in enumerate(country_codes):
+                r = self._parse_console_series(install_data, "install_events", i + 1, cc)
+                by_country.append(r)
+
+        return ConsoleInstallStats(
+            package_name=package_name,
+            start_date=start_date,
+            end_date=end_date,
+            install_events=install_result,
+            net_installs=net_result,
+            active_users=active_result,
+            by_country=by_country,
+        )

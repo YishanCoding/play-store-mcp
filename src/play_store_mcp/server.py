@@ -1781,6 +1781,52 @@ def list_vitals_anomalies(
     return [a.model_dump() for a in anomalies]
 
 
+@mcp.tool()
+def get_install_stats(
+    package_name: str,
+    developer_id: str,
+    app_id: str,
+    start_date: str,
+    end_date: str,
+    country_codes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Get install statistics from Play Console via browser session (OpenCLI).
+
+    Returns daily install events, net installs, and active users. Optionally
+    breaks down install events by country.
+
+    REQUIREMENT: OpenCLI must be installed and the automation browser must be
+    logged into Play Console (play.google.com/console).
+
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/statistics
+
+    Args:
+        package_name: App package name (e.g. com.example.app)
+        developer_id: Numeric developer account ID from Play Console URL
+        app_id: Numeric app ID from Play Console URL
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD
+        country_codes: Optional list of country codes for per-country breakdown (e.g. ["US", "GB"])
+
+    Returns:
+        install_events: Total installs including re-installs with daily breakdown
+        net_installs: Net installs (installs minus uninstalls)
+        active_users: Unique active users
+        by_country: Per-country install events (if country_codes provided)
+    """
+    client = get_client_from_context()
+    result = client.get_install_stats(
+        package_name=package_name,
+        developer_id=developer_id,
+        app_id=app_id,
+        start_date=start_date,
+        end_date=end_date,
+        country_codes=country_codes,
+    )
+    return result.model_dump()
+
+
 # =============================================================================
 # Entry Point
 # =============================================================================

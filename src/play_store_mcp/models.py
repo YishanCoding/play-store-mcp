@@ -466,3 +466,36 @@ class VitalsAnomaly(BaseModel):
     )
     first_detection_time: str | None = Field(None, description="When the anomaly was first detected")
     last_detected_day: str | None = Field(None, description="Last day the anomaly was observed")
+
+
+# ---------------------------------------------------------------------------
+# Play Console Browser-Based Stats (via OpenCLI)
+# ---------------------------------------------------------------------------
+
+
+class DailyStatPoint(BaseModel):
+    """A single day's data point from Play Console statistics."""
+
+    date: str = Field(..., description="Date in YYYY-MM-DD format")
+    value: int = Field(..., description="Metric value for this day")
+
+
+class ConsoleStatsResult(BaseModel):
+    """Result from one metric/dimension combination."""
+
+    metric: str = Field(..., description="Metric name: install_events, net_installs, active_users")
+    dimension: str = Field(default="overall", description="Dimension: overall or country code")
+    total: int = Field(0, description="Sum of all daily values in range")
+    data_points: list[DailyStatPoint] = Field(default_factory=list, description="Daily data points (non-zero only)")
+
+
+class ConsoleInstallStats(BaseModel):
+    """Install statistics from Play Console (requires browser login via OpenCLI)."""
+
+    package_name: str = Field(..., description="App package name")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD")
+    end_date: str = Field(..., description="End date YYYY-MM-DD")
+    install_events: ConsoleStatsResult | None = Field(None, description="Total install events including re-installs")
+    net_installs: ConsoleStatsResult | None = Field(None, description="Net installs = installs - uninstalls")
+    active_users: ConsoleStatsResult | None = Field(None, description="Unique active users")
+    by_country: list[ConsoleStatsResult] = Field(default_factory=list, description="Per-country install events breakdown")
