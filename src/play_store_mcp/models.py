@@ -499,3 +499,37 @@ class ConsoleInstallStats(BaseModel):
     net_installs: ConsoleStatsResult | None = Field(None, description="Net installs = installs - uninstalls")
     active_users: ConsoleStatsResult | None = Field(None, description="Unique active users")
     by_country: list[ConsoleStatsResult] = Field(default_factory=list, description="Per-country install events breakdown")
+
+
+class SearchTermResult(BaseModel):
+    """A single search term with its install and visitor stats."""
+
+    term: str = Field(..., description="Search term string")
+    installs: int = Field(0, description="Number of installs attributed to this search term")
+    store_listing_visitors: int = Field(0, description="Number of store listing visitors from this term")
+
+
+class SearchTermsStats(BaseModel):
+    """Search terms statistics from Play Console."""
+
+    package_name: str = Field(..., description="App package name")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD")
+    end_date: str = Field(..., description="End date YYYY-MM-DD")
+    terms: list[SearchTermResult] = Field(default_factory=list, description="Search terms sorted by installs descending")
+
+
+class AcquisitionFunnelStage(BaseModel):
+    """A single stage in the user acquisition funnel."""
+
+    stage: str = Field(..., description="Stage name: impressions, store_listing_visitors, installers, buyers")
+    value: int = Field(0, description="Count for this stage")
+    conversion_rate: float = Field(0.0, description="Conversion rate relative to previous stage (0.0-1.0)")
+
+
+class AcquisitionFunnelResult(BaseModel):
+    """User acquisition funnel from Play Console."""
+
+    package_name: str = Field(..., description="App package name")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD")
+    end_date: str = Field(..., description="End date YYYY-MM-DD")
+    stages: list[AcquisitionFunnelStage] = Field(default_factory=list, description="Funnel stages in order")

@@ -1827,6 +1827,84 @@ def get_install_stats(
     return result.model_dump()
 
 
+@mcp.tool()
+def get_search_terms(
+    package_name: str,
+    developer_id: str,
+    app_id: str,
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    """Get top search terms driving installs from Play Console via browser session (OpenCLI).
+
+    Returns the search terms that brought users to the store listing, sorted by installs.
+
+    REQUIREMENT: OpenCLI must be installed and the automation browser must be
+    logged into Play Console (play.google.com/console).
+
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/statistics
+
+    Args:
+        package_name: App package name (e.g. com.example.app)
+        developer_id: Numeric developer account ID from Play Console URL
+        app_id: Numeric app ID from Play Console URL
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD
+
+    Returns:
+        terms: List of search terms with installs and store_listing_visitors, sorted by installs desc
+    """
+    client = get_client_from_context()
+    result = client.get_search_terms(
+        package_name=package_name,
+        developer_id=developer_id,
+        app_id=app_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_acquisition_funnel(
+    package_name: str,
+    developer_id: str,
+    app_id: str,
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    """Get user acquisition funnel from Play Console via browser session (OpenCLI).
+
+    Returns the conversion funnel: impressions → store listing visitors → installers → buyers.
+
+    REQUIREMENT: OpenCLI must be installed and the automation browser must be
+    logged into Play Console (play.google.com/console).
+
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/grow-overview
+
+    Args:
+        package_name: App package name (e.g. com.example.app)
+        developer_id: Numeric developer account ID from Play Console URL
+        app_id: Numeric app ID from Play Console URL
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD
+
+    Returns:
+        stages: Funnel stages with value and conversion_rate relative to previous stage
+    """
+    client = get_client_from_context()
+    result = client.get_acquisition_funnel(
+        package_name=package_name,
+        developer_id=developer_id,
+        app_id=app_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return result.model_dump()
+
+
 # =============================================================================
 # Entry Point
 # =============================================================================

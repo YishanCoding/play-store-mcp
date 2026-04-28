@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 if TYPE_CHECKING:
-    from unittest.mock import MagicMock
+    pass
 
 from play_store_mcp.client import PlayStoreClient, PlayStoreClientError
 
@@ -914,3 +916,131 @@ class TestBatchOperations:
         assert result.successful_count == 2
         assert result.failed_count == 0
         assert len(result.results) == 2
+
+
+class TestBrowserStats:
+    """Tests for browser-based stats methods (get_search_terms, get_acquisition_funnel)."""
+
+    @pytest.fixture()
+    def bare_client(self) -> PlayStoreClient:
+        return PlayStoreClient(credentials_path="/nonexistent/path.json")
+
+    def test_get_search_terms_success(self, bare_client: PlayStoreClient) -> None:
+        response = {
+            "1": [
+                {"1": "puzzle game", "2": [{"1": 42}, {"1": 120}]},
+                {"1": "brain teaser", "2": [{"1": 15}, {"1": 60}]},
+                {"1": "word game", "2": [{"1": 28}, {"1": 95}]},
+            ]
+        }
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(response), stderr="")
+            result = bare_client.get_search_terms(
+                package_name="com.vast.jujubit",
+                developer_id="6287361731679611511",
+                app_id="4973755093875388037",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        assert result.package_name == "com.vast.jujubit"
+        assert result.start_date == "2024-01-01"
+        assert result.end_date == "2024-01-31"
+        assert len(result.terms) == 3
+        # Should be sorted by installs descending
+        assert result.terms[0].term == "puzzle game"
+        assert result.terms[0].installs == 42
+        assert result.terms[0].store_listing_visitors == 120
+        assert result.terms[1].term == "word game"
+        assert result.terms[1].installs == 28
+        assert result.terms[2].term == "brain teaser"
+        assert result.terms[2].installs == 15
+
+    def test_get_search_terms_empty(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({}), stderr="")
+            result = bare_client.get_search_terms(
+                package_name="com.vast.jujubit",
+                developer_id="123",
+                app_id="456",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+        assert result.terms == []
+
+    def test_get_search_terms_browser_error(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"error": "Not logged into Play Console"}),
+                stderr="",
+            )
+            with pytest.raises(PlayStoreClientError, match="Not logged into Play Console"):
+                bare_client.get_search_terms(
+                    package_name="com.vast.jujubit",
+                    developer_id="123",
+                    app_id="456",
+                    start_date="2024-01-01",
+                    end_date="2024-01-31",
+                )
+
+    def test_get_acquisition_funnel_success(self, bare_client: PlayStoreClient) -> None:
+        response = {
+            "1": [
+                {"1": 1, "2": 10000},
+                {"1": 2, "2": 3000},
+                {"1": 3, "2": 500},
+                {"1": 4, "2": 50},
+            ]
+        }
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(response), stderr="")
+            result = bare_client.get_acquisition_funnel(
+                package_name="com.vast.jujubit",
+                developer_id="6287361731679611511",
+                app_id="4973755093875388037",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        assert result.package_name == "com.vast.jujubit"
+        assert len(result.stages) == 4
+        assert result.stages[0].stage == "impressions"
+        assert result.stages[0].value == 10000
+        assert result.stages[0].conversion_rate == 0.0
+        assert result.stages[1].stage == "store_listing_visitors"
+        assert result.stages[1].value == 3000
+        assert result.stages[1].conversion_rate == 0.3
+        assert result.stages[2].stage == "installers"
+        assert result.stages[2].value == 500
+        assert round(result.stages[2].conversion_rate, 4) == round(500 / 3000, 4)
+        assert result.stages[3].stage == "buyers"
+        assert result.stages[3].value == 50
+
+    def test_get_acquisition_funnel_empty(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({}), stderr="")
+            result = bare_client.get_acquisition_funnel(
+                package_name="com.vast.jujubit",
+                developer_id="123",
+                app_id="456",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+        assert result.stages == []
+
+    def test_get_acquisition_funnel_browser_error(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"error": "Not logged into Play Console"}),
+                stderr="",
+            )
+            with pytest.raises(PlayStoreClientError, match="Not logged into Play Console"):
+                bare_client.get_acquisition_funnel(
+                    package_name="com.vast.jujubit",
+                    developer_id="123",
+                    app_id="456",
+                    start_date="2024-01-01",
+                    end_date="2024-01-31",
+                )
