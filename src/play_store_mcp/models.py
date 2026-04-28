@@ -499,3 +499,37 @@ class ConsoleInstallStats(BaseModel):
     net_installs: ConsoleStatsResult | None = Field(None, description="Net installs = installs - uninstalls")
     active_users: ConsoleStatsResult | None = Field(None, description="Unique active users")
     by_country: list[ConsoleStatsResult] = Field(default_factory=list, description="Per-country install events breakdown")
+
+
+class SearchTermResult(BaseModel):
+    """A single search term row with acquisition stats."""
+
+    term: str = Field(..., description="Search term (or display name; may be 'Other' for thresholded)")
+    installs: int = Field(0, description="Acquisitions (installs) attributable to this term")
+    store_listing_visitors: int = Field(0, description="Store listing visitors who searched this term")
+
+
+class SearchTermsStats(BaseModel):
+    """Search term acquisition stats from Play Console (browser-based)."""
+
+    package_name: str = Field(..., description="App package name")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD")
+    end_date: str = Field(..., description="End date YYYY-MM-DD")
+    terms: list[SearchTermResult] = Field(default_factory=list, description="Terms ordered by installs descending")
+
+
+class AcquisitionFunnelStage(BaseModel):
+    """One stage of the acquisition funnel."""
+
+    stage: str = Field(..., description="Stage name: store_listing_visitors, installers, buyers, etc.")
+    value: int = Field(0, description="Count for this stage")
+    conversion_rate: float = Field(0.0, description="Conversion rate from the previous stage (0.0 for first)")
+
+
+class AcquisitionFunnelResult(BaseModel):
+    """Acquisition funnel summary from Play Console (browser-based)."""
+
+    package_name: str = Field(..., description="App package name")
+    start_date: str = Field(..., description="Start date YYYY-MM-DD")
+    end_date: str = Field(..., description="End date YYYY-MM-DD")
+    stages: list[AcquisitionFunnelStage] = Field(default_factory=list, description="Funnel stages in order")

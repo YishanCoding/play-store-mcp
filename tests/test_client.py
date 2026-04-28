@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
@@ -914,3 +916,202 @@ class TestBatchOperations:
         assert result.successful_count == 2
         assert result.failed_count == 0
         assert len(result.results) == 2
+
+
+def _mk_subprocess_result(stdout: str, returncode: int = 0, stderr: str = "") -> Any:
+    """Create a mock subprocess.run result."""
+    from types import SimpleNamespace
+    return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+
+
+class TestSearchTerms:
+    """Tests for get_search_terms (browser-based via OpenCLI)."""
+
+    def test_get_search_terms_parses_response(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        sample = {
+            "1": {
+                "1": 2,
+                "2": {"2": {"1": "100"}, "3": {"1": "10"}, "4": {"1": 0.1}},
+                "3": [
+                    {"1": {"1": "alpha", "2": "alpha"}, "2": {"1": "60"}, "3": {"1": "6"}, "4": {"1": 0.1}},
+                    {"1": {"1": "beta", "2": "beta term"}, "2": {"1": "40"}, "3": {"1": "4"}, "4": {"1": 0.1}},
+                ],
+            }
+        }
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result(json.dumps(sample)),
+        ) as mock_run:
+            result = client.get_search_terms(
+                package_name="com.example.app",
+                developer_id="123",
+                app_id="456",
+                start_date="2026-04-01",
+                end_date="2026-04-28",
+            )
+
+        assert mock_run.call_count == 1
+        cmd = mock_run.call_args[0][0]
+        assert cmd[1:3] == ["browser", "eval"]
+        assert "getAcquisitionDetailsTableData" in cmd[3]
+        assert "'1':2" in cmd[3]  # STORE_QUERY dimension code
+
+        assert result.package_name == "com.example.app"
+        assert result.start_date == "2026-04-01"
+        assert result.end_date == "2026-04-28"
+        assert len(result.terms) == 2
+        # Sorted by installs descending; here both equal so order preserved
+        assert result.terms[0].term == "alpha"
+        assert result.terms[0].installs == 6
+        assert result.terms[0].store_listing_visitors == 60
+        assert result.terms[1].term == "beta term"
+
+    def test_get_search_terms_empty(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result(json.dumps({"1": {"1": 2, "2": {}}})),
+        ):
+            result = client.get_search_terms(
+                package_name="com.example.app",
+                developer_id="123",
+                app_id="456",
+                start_date="2026-04-01",
+                end_date="2026-04-28",
+            )
+        assert result.terms == []
+
+    def test_get_search_terms_invalid_json_raises(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result("not json"),
+        ):
+            with pytest.raises(PlayStoreClientError, match="Invalid JSON"):
+                client.get_search_terms(
+                    package_name="com.example.app",
+                    developer_id="123",
+                    app_id="456",
+                    start_date="2026-04-01",
+                    end_date="2026-04-28",
+                )
+
+    def test_get_search_terms_subprocess_failure_raises(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result("", returncode=1, stderr="opencli not running"),
+        ):
+            with pytest.raises(PlayStoreClientError, match="opencli browser eval failed"):
+                client.get_search_terms(
+                    package_name="com.example.app",
+                    developer_id="123",
+                    app_id="456",
+                    start_date="2026-04-01",
+                    end_date="2026-04-28",
+                )
+
+    def test_get_search_terms_sorted_by_installs(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        sample = {
+            "1": {
+                "1": 2,
+                "2": {},
+                "3": [
+                    {"1": {"1": "low", "2": "low"}, "2": {"1": "10"}, "3": {"1": "1"}, "4": {}},
+                    {"1": {"1": "high", "2": "high"}, "2": {"1": "100"}, "3": {"1": "20"}, "4": {}},
+                    {"1": {"1": "mid", "2": "mid"}, "2": {"1": "50"}, "3": {"1": "5"}, "4": {}},
+                ],
+            }
+        }
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result(json.dumps(sample)),
+        ):
+            result = client.get_search_terms(
+                package_name="com.example.app",
+                developer_id="123",
+                app_id="456",
+                start_date="2026-04-01",
+                end_date="2026-04-28",
+            )
+        assert [t.term for t in result.terms] == ["high", "mid", "low"]
+        assert [t.installs for t in result.terms] == [20, 5, 1]
+
+
+class TestAcquisitionFunnel:
+    """Tests for get_acquisition_funnel (browser-based via OpenCLI)."""
+
+    def test_get_acquisition_funnel_parses_response(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        sample = {
+            "1": {
+                "1": 6,
+                "2": {"2": {"1": "177"}, "3": {"1": "22"}, "4": {"1": 0.1242937853107345}},
+                "3": [],
+            }
+        }
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result(json.dumps(sample)),
+        ) as mock_run:
+            result = client.get_acquisition_funnel(
+                package_name="com.example.app",
+                developer_id="123",
+                app_id="456",
+                start_date="2026-03-27",
+                end_date="2026-04-23",
+            )
+
+        assert mock_run.call_count == 1
+        cmd = mock_run.call_args[0][0]
+        assert "getAcquisitionDetailsTableData" in cmd[3]
+        assert "'1':6" in cmd[3]  # COUNTRY dimension code
+
+        assert result.package_name == "com.example.app"
+        assert len(result.stages) == 2
+        assert result.stages[0].stage == "store_listing_visitors"
+        assert result.stages[0].value == 177
+        assert result.stages[0].conversion_rate == 0.0
+        assert result.stages[1].stage == "installers"
+        assert result.stages[1].value == 22
+        assert abs(result.stages[1].conversion_rate - 0.1242937853107345) < 1e-9
+
+    def test_get_acquisition_funnel_empty_totals(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        with patch(
+            "play_store_mcp.client.subprocess.run",
+            return_value=_mk_subprocess_result(json.dumps({"1": {"1": 6, "2": {}}})),
+        ):
+            result = client.get_acquisition_funnel(
+                package_name="com.example.app",
+                developer_id="123",
+                app_id="456",
+                start_date="2026-03-27",
+                end_date="2026-04-23",
+            )
+        assert result.stages[0].value == 0
+        assert result.stages[1].value == 0
+        assert result.stages[1].conversion_rate == 0.0

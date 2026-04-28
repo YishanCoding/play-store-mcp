@@ -44,10 +44,14 @@ from play_store_mcp.models import (
     Release,
     Review,
     ReviewReplyResult,
+    SearchTermResult,
+    SearchTermsStats,
     SubscriptionProduct,
     SubscriptionPurchase,
     SubscriptionPurchaseV2,
     TesterInfo,
+    AcquisitionFunnelResult,
+    AcquisitionFunnelStage,
     TrackInfo,
     UserInfo,
     UserOperationResult,
@@ -3468,4 +3472,190 @@ class PlayStoreClient:
             net_installs=net_result,
             active_users=active_result,
             by_country=by_country,
+        )
+
+    # =========================================================================
+    # Acquisition Reporting (browser-based)
+    # =========================================================================
+
+    # Dimension IDs for the acquisition reporting RPC (field "3"."1" of the body):
+    #   2 = STORE_QUERY (search term)
+    #   6 = PLAY_COUNTRY (used for the cross-country aggregate / funnel summary)
+    _ACQ_DIM_STORE_QUERY = 2
+    _ACQ_DIM_COUNTRY = 6
+
+    def _fetch_acquisition_table(
+        self,
+        developer_id: str,
+        app_id: str,
+        dimension_id: int,
+        start_year: int, start_month: int, start_day: int,
+        end_year: int, end_month: int, end_day: int,
+    ) -> dict:
+        """Call stats/acquisition:getAcquisitionDetailsTableData via the browser session."""
+        js = f"""
+(async function() {{
+  const SAPISID = document.cookie.match(/SAPISID=([^;]+)/)?.[1];
+  if (!SAPISID) return JSON.stringify({{error: 'Not logged into Play Console'}});
+  const ts = Date.now();
+  const msgBuffer = new TextEncoder().encode(ts + ' ' + SAPISID + ' https://play.google.com');
+  const hashBuffer = await crypto.subtle.digest('SHA-1', msgBuffer);
+  const sha1 = Array.from(new Uint8Array(hashBuffer)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  const auth = 'SAPISIDHASH ' + ts + '_' + sha1;
+  const DEV_ID = '{developer_id}';
+  const APP_ID = '{app_id}';
+  const API_KEY = 'AIzaSyBAha_rcoO_aGsmiR5fWbNfdOjqT0gXwbk';
+  const httpHeaders = 'Content-Type:application/json+protobuf\\r\\nX-Goog-AuthUser:0\\r\\nAuthorization:' + auth + '\\r\\nX-Goog-Api-Key:' + API_KEY + '\\r\\n';
+  const url = 'https://playconsolestatsfrontend-pa.clients6.google.com/v1/developers/' + DEV_ID + '/apps/' + APP_ID + '/stats/acquisition:getAcquisitionDetailsTableData?$httpHeaders=' + encodeURIComponent(httpHeaders);
+  const body = JSON.stringify({{'1':{{'1':{{'1':DEV_ID}},'2':{{'1':APP_ID}}}},'2':{{'1':{{'1':{start_year},'2':{start_month},'3':{start_day}}},'2':{{'1':{end_year},'2':{end_month},'3':{end_day}}}}},'3':{{'1':{dimension_id}}},'5':1}});
+  const resp = await fetch(url, {{method:'POST', body:body, credentials:'include'}});
+  const data = await resp.json();
+  return JSON.stringify(data);
+}})()
+"""
+        raw = self._run_browser_js(js)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            raise PlayStoreClientError(f"Invalid JSON from browser acquisition fetch: {raw[:200]}")
+
+    @staticmethod
+    def _to_int(obj: dict | None) -> int:
+        """Pull an int out of a wrapped {"1": "<n>"} value (often a string)."""
+        if not obj:
+            return 0
+        v = obj.get("1")
+        if v is None:
+            return 0
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _to_float(obj: dict | None) -> float:
+        if not obj:
+            return 0.0
+        v = obj.get("1")
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def get_search_terms(
+        self,
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+        start_date: str,
+        end_date: str,
+    ) -> SearchTermsStats:
+        """Get search-term acquisition stats from Play Console via browser session.
+
+        Calls the internal `stats/acquisition:getAcquisitionDetailsTableData` RPC
+        with the STORE_QUERY dimension. Many individual queries are aggregated
+        by Google as "Other" (REMOVED_BY_THRESHOLDING_STORE_QUERY) once they fall
+        below the privacy threshold.
+
+        Args:
+            package_name: App package name (for display only).
+            developer_id: Numeric developer ID from Play Console URL.
+            app_id: Numeric app ID from Play Console URL.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        from datetime import date as date_cls
+
+        d_start = date_cls.fromisoformat(start_date)
+        d_end = date_cls.fromisoformat(end_date)
+
+        self._logger.info("Fetching search terms via browser", package_name=package_name)
+
+        data = self._fetch_acquisition_table(
+            developer_id, app_id, self._ACQ_DIM_STORE_QUERY,
+            d_start.year, d_start.month, d_start.day,
+            d_end.year, d_end.month, d_end.day,
+        )
+
+        rows = data.get("1", {}).get("3", []) or []
+        terms: list[SearchTermResult] = []
+        for row in rows:
+            label = row.get("1", {})
+            display = label.get("2") or label.get("1") or ""
+            visitors = self._to_int(row.get("2"))
+            installs = self._to_int(row.get("3"))
+            terms.append(SearchTermResult(
+                term=display,
+                installs=installs,
+                store_listing_visitors=visitors,
+            ))
+
+        terms.sort(key=lambda t: t.installs, reverse=True)
+
+        return SearchTermsStats(
+            package_name=package_name,
+            start_date=start_date,
+            end_date=end_date,
+            terms=terms,
+        )
+
+    def get_acquisition_funnel(
+        self,
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+        start_date: str,
+        end_date: str,
+    ) -> AcquisitionFunnelResult:
+        """Get the acquisition funnel summary from Play Console via browser session.
+
+        Calls the internal `stats/acquisition:getAcquisitionDetailsTableData` RPC
+        and reads the per-period totals (field "1"."2") for store listing
+        visitors -> installers conversion.
+
+        Args:
+            package_name: App package name (for display only).
+            developer_id: Numeric developer ID from Play Console URL.
+            app_id: Numeric app ID from Play Console URL.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD.
+        """
+        from datetime import date as date_cls
+
+        d_start = date_cls.fromisoformat(start_date)
+        d_end = date_cls.fromisoformat(end_date)
+
+        self._logger.info("Fetching acquisition funnel via browser", package_name=package_name)
+
+        data = self._fetch_acquisition_table(
+            developer_id, app_id, self._ACQ_DIM_COUNTRY,
+            d_start.year, d_start.month, d_start.day,
+            d_end.year, d_end.month, d_end.day,
+        )
+
+        totals = data.get("1", {}).get("2", {}) or {}
+        visitors = self._to_int(totals.get("2"))
+        installers = self._to_int(totals.get("3"))
+        conv_rate = self._to_float(totals.get("4"))
+
+        stages = [
+            AcquisitionFunnelStage(
+                stage="store_listing_visitors",
+                value=visitors,
+                conversion_rate=0.0,
+            ),
+            AcquisitionFunnelStage(
+                stage="installers",
+                value=installers,
+                conversion_rate=conv_rate,
+            ),
+        ]
+
+        return AcquisitionFunnelResult(
+            package_name=package_name,
+            start_date=start_date,
+            end_date=end_date,
+            stages=stages,
         )
