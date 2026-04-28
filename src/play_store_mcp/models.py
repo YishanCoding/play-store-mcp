@@ -422,3 +422,47 @@ class SubscriptionPurchaseV2(BaseModel):
     product_id: str | None = Field(None, description="Subscription product ID")
     base_plan_id: str | None = Field(None, description="Base plan ID")
     offer_id: str | None = Field(None, description="Offer ID if applicable")
+
+
+# =============================================================================
+# Play Developer Reporting API Models
+# =============================================================================
+
+
+class VitalsDataPoint(BaseModel):
+    """A single data point from a vitals metric set query."""
+
+    date: str = Field(..., description="Date string YYYY-MM-DD")
+    aggregation_period: str = Field(..., description="DAILY or HOURLY")
+    dimensions: dict[str, str] = Field(
+        default_factory=dict, description="Dimension key-value pairs (e.g. apiLevel: '33')"
+    )
+    metrics: dict[str, float | None] = Field(
+        default_factory=dict, description="Metric key-value pairs (e.g. crashRate: 0.012)"
+    )
+
+
+class VitalsQueryResult(BaseModel):
+    """Result of querying a Play Developer Reporting vitals metric set."""
+
+    package_name: str = Field(..., description="App package name")
+    metric_set: str = Field(
+        ..., description="Metric set name: crashRate, anrRate, slowStartup, etc."
+    )
+    aggregation_period: str = Field(..., description="DAILY or HOURLY")
+    data_points: list[VitalsDataPoint] = Field(
+        default_factory=list, description="Timeline data points"
+    )
+    row_count: int = Field(0, description="Total number of rows returned")
+
+
+class VitalsAnomaly(BaseModel):
+    """A detected anomaly in a vitals metric."""
+
+    name: str = Field(..., description="Anomaly resource name")
+    metric_set: str = Field(..., description="Metric set where anomaly was detected")
+    dimensions: dict[str, str] = Field(
+        default_factory=dict, description="Dimension values for this anomaly"
+    )
+    first_detection_time: str | None = Field(None, description="When the anomaly was first detected")
+    last_detected_day: str | None = Field(None, description="Last day the anomaly was observed")

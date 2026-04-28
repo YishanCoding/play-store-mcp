@@ -61,6 +61,9 @@ logger = structlog.get_logger(__name__)
 # API scopes required for Play Developer API
 SCOPES = ["https://www.googleapis.com/auth/androidpublisher"]
 
+# Scope for Play Developer Reporting API (vitals/crash/ANR data)
+REPORTING_SCOPES = ["https://www.googleapis.com/auth/playdeveloperreporting"]
+
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
@@ -135,6 +138,7 @@ class PlayStoreClient:
         self._credentials_json = credentials_json or os.environ.get("GOOGLE_PLAY_STORE_CREDENTIALS")
         self._application_name = application_name
         self._service: AndroidPublisherResource | None = None
+        self._reporting_service: Any | None = None
         self._logger = logger.bind(component="PlayStoreClient")
 
     # =========================================================================
@@ -315,6 +319,59 @@ class PlayStoreClient:
                 raise
             self._logger.exception("Failed to initialize API client", error=str(e))
             raise PlayStoreClientError(f"Failed to initialize API client: {e}") from e
+
+    def _get_reporting_service(self) -> Any:
+        """Get or create the Play Developer Reporting API service instance."""
+        if self._reporting_service is not None:
+            return self._reporting_service
+
+        self._logger.info("Initializing Play Developer Reporting API client")
+
+        try:
+            credentials = None
+
+            if self._credentials_json:
+                if isinstance(self._credentials_json, str):
+                    if self._credentials_json.strip().startswith("{"):
+                        creds_info = json.loads(self._credentials_json)
+                        credentials = service_account.Credentials.from_service_account_info(
+                            creds_info, scopes=REPORTING_SCOPES
+                        )
+                    elif Path(self._credentials_json).exists():
+                        credentials = service_account.Credentials.from_service_account_file(
+                            self._credentials_json, scopes=REPORTING_SCOPES
+                        )
+                elif isinstance(self._credentials_json, dict):
+                    credentials = service_account.Credentials.from_service_account_info(
+                        self._credentials_json, scopes=REPORTING_SCOPES
+                    )
+
+            if not credentials and self._credentials_path:
+                creds_path = Path(self._credentials_path)
+                if creds_path.exists():
+                    credentials = service_account.Credentials.from_service_account_file(
+                        str(creds_path), scopes=REPORTING_SCOPES
+                    )
+
+            if not credentials:
+                raise PlayStoreClientError(
+                    "No valid credentials found for Reporting API. "
+                    "Set GOOGLE_PLAY_STORE_CREDENTIALS (JSON or path)."
+                )
+
+            self._reporting_service = build(
+                "playdeveloperreporting",
+                "v1beta1",
+                credentials=credentials,
+                cache_discovery=False,
+            )
+            self._logger.info("Reporting API client initialized successfully")
+            return self._reporting_service
+        except Exception as e:
+            if isinstance(e, PlayStoreClientError):
+                raise
+            self._logger.exception("Failed to initialize Reporting API client", error=str(e))
+            raise PlayStoreClientError(f"Failed to initialize Reporting API client: {e}") from e
 
     def _create_edit(self, package_name: str) -> str:
         """Create a new edit for the package.
@@ -2864,3 +2921,337 @@ class PlayStoreClient:
                 message=f"Failed to revoke subscription: {e.reason}",
                 error=str(e),
             )
+
+    # =========================================================================
+    # Play Developer Reporting API
+    # =========================================================================
+
+    def _parse_date(self, time_unit: dict[str, Any]) -> str:
+        """Convert Reporting API TimeUnit dict to YYYY-MM-DD string."""
+        y = time_unit.get("year", 0)
+        m = time_unit.get("month", 0)
+        d = time_unit.get("day", 0)
+        return f"{y:04d}-{m:02d}-{d:02d}"
+
+    def _build_time_unit(self, date_str: str) -> dict[str, Any]:
+        """Convert YYYY-MM-DD string to Reporting API TimeUnit dict."""
+        parts = date_str.split("-")
+        return {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}
+
+    def _query_metric_set(
+        self,
+        package_name: str,
+        metric_set_name: str,
+        metrics: list[str],
+        dimensions: list[str],
+        start_date: str,
+        end_date: str,
+        aggregation_period: str = "DAILY",
+    ) -> "VitalsQueryResult":
+        """Generic helper to query any Reporting API metric set.
+
+        Args:
+            package_name: App package name.
+            metric_set_name: e.g. 'crashRateMetricSet', 'anrRateMetricSet'.
+            metrics: List of metric names to retrieve.
+            dimensions: List of dimension names to group by.
+            start_date: Start date as YYYY-MM-DD.
+            end_date: End date as YYYY-MM-DD (exclusive).
+            aggregation_period: 'DAILY' or 'HOURLY'.
+
+        Returns:
+            VitalsQueryResult with timeline data points.
+        """
+        from play_store_mcp.models import VitalsDataPoint, VitalsQueryResult
+
+        service = self._get_reporting_service()
+        parent = f"apps/{package_name}"
+
+        body: dict[str, Any] = {
+            "timeline": {
+                "aggregationPeriod": aggregation_period,
+                "startTime": self._build_time_unit(start_date),
+                "endTime": self._build_time_unit(end_date),
+            },
+            "metrics": metrics,
+        }
+        if dimensions:
+            body["dimensions"] = dimensions
+
+        self._logger.info(
+            "Querying metric set",
+            package_name=package_name,
+            metric_set=metric_set_name,
+            start=start_date,
+            end=end_date,
+        )
+
+        try:
+            resource = getattr(service, metric_set_name)()
+            result = resource.query(name=f"{parent}/{metric_set_name}", body=body).execute()
+
+            data_points: list[VitalsDataPoint] = []
+            for row in result.get("rows", []):
+                dims: dict[str, str] = {}
+                for d in row.get("dimensions", []):
+                    key = d.get("dimension", "")
+                    val = d.get("stringValue") or d.get("int64Value") or d.get("decimalValue", {}).get("value", "")
+                    dims[key] = str(val)
+
+                met: dict[str, float | None] = {}
+                for m in row.get("metrics", []):
+                    key = m.get("metric", "")
+                    decimal = m.get("decimalValue", {})
+                    val_str = decimal.get("value") if decimal else None
+                    met[key] = float(val_str) if val_str is not None else None
+
+                date_str = self._parse_date(row.get("startTime", {}))
+                data_points.append(
+                    VitalsDataPoint(
+                        date=date_str,
+                        aggregation_period=aggregation_period,
+                        dimensions=dims,
+                        metrics=met,
+                    )
+                )
+
+            # Strip trailing 'MetricSet' suffix for display
+            display_name = metric_set_name.replace("MetricSet", "")
+
+            return VitalsQueryResult(
+                package_name=package_name,
+                metric_set=display_name,
+                aggregation_period=aggregation_period,
+                data_points=data_points,
+                row_count=len(data_points),
+            )
+
+        except HttpError as e:
+            self._logger.exception("Reporting API query failed", error=str(e))
+            raise PlayStoreClientError(
+                f"Reporting API query failed for {metric_set_name}: {e.reason}"
+            ) from e
+
+    def get_crash_rate(
+        self,
+        package_name: str,
+        start_date: str,
+        end_date: str,
+        dimensions: list[str] | None = None,
+    ) -> "VitalsQueryResult":
+        """Query crash rate metrics from Play Developer Reporting API.
+
+        Requires the service account to have Performance Analysis permission
+        in Play Console (Account-level > Performance Analysis).
+
+        Args:
+            package_name: App package name.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD (exclusive).
+            dimensions: Optional grouping dimensions e.g. ['versionCode', 'apiLevel'].
+
+        Returns:
+            VitalsQueryResult with crashRate and distinctUsers per day.
+        """
+        return self._query_metric_set(
+            package_name=package_name,
+            metric_set_name="crashRateMetricSet",
+            metrics=["crashRate", "distinctUsers", "crashCount"],
+            dimensions=dimensions or [],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def get_anr_rate(
+        self,
+        package_name: str,
+        start_date: str,
+        end_date: str,
+        dimensions: list[str] | None = None,
+    ) -> "VitalsQueryResult":
+        """Query ANR (Application Not Responding) rate metrics.
+
+        Args:
+            package_name: App package name.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD (exclusive).
+            dimensions: Optional grouping dimensions e.g. ['versionCode', 'apiLevel'].
+
+        Returns:
+            VitalsQueryResult with anrRate and distinctUsers per day.
+        """
+        return self._query_metric_set(
+            package_name=package_name,
+            metric_set_name="anrRateMetricSet",
+            metrics=["anrRate", "distinctUsers", "anrCount"],
+            dimensions=dimensions or [],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def get_slow_startup_rate(
+        self,
+        package_name: str,
+        start_date: str,
+        end_date: str,
+        dimensions: list[str] | None = None,
+    ) -> "VitalsQueryResult":
+        """Query slow startup rate metrics.
+
+        Args:
+            package_name: App package name.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD (exclusive).
+            dimensions: Optional grouping dimensions.
+
+        Returns:
+            VitalsQueryResult with slowStartupRate per day.
+        """
+        return self._query_metric_set(
+            package_name=package_name,
+            metric_set_name="slowStartupRateMetricSet",
+            metrics=["slowStartupRate", "distinctUsers", "slowStartupCount"],
+            dimensions=dimensions or [],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def get_slow_rendering_rate(
+        self,
+        package_name: str,
+        start_date: str,
+        end_date: str,
+        dimensions: list[str] | None = None,
+    ) -> "VitalsQueryResult":
+        """Query slow rendering rate metrics (< 20fps / < 30fps).
+
+        Args:
+            package_name: App package name.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD (exclusive).
+            dimensions: Optional grouping dimensions.
+
+        Returns:
+            VitalsQueryResult with slowRenderingRate20Fps, slowRenderingRate30Fps per day.
+        """
+        return self._query_metric_set(
+            package_name=package_name,
+            metric_set_name="slowRenderingRateMetricSet",
+            metrics=["slowRenderingRate20Fps", "slowRenderingRate30Fps", "distinctUsers"],
+            dimensions=dimensions or [],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def get_excessive_wakeup_rate(
+        self,
+        package_name: str,
+        start_date: str,
+        end_date: str,
+        dimensions: list[str] | None = None,
+    ) -> "VitalsQueryResult":
+        """Query excessive wakeup rate metrics.
+
+        Args:
+            package_name: App package name.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD (exclusive).
+            dimensions: Optional grouping dimensions.
+
+        Returns:
+            VitalsQueryResult with excessiveWakeupRate per day.
+        """
+        return self._query_metric_set(
+            package_name=package_name,
+            metric_set_name="excessiveWakeupRateMetricSet",
+            metrics=["excessiveWakeupRate", "distinctUsers", "excessiveWakeupCount"],
+            dimensions=dimensions or [],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def get_stuck_wakelock_rate(
+        self,
+        package_name: str,
+        start_date: str,
+        end_date: str,
+        dimensions: list[str] | None = None,
+    ) -> "VitalsQueryResult":
+        """Query stuck background wakelock rate metrics.
+
+        Args:
+            package_name: App package name.
+            start_date: Start date YYYY-MM-DD.
+            end_date: End date YYYY-MM-DD (exclusive).
+            dimensions: Optional grouping dimensions.
+
+        Returns:
+            VitalsQueryResult with stuckBgWakelockRate per day.
+        """
+        return self._query_metric_set(
+            package_name=package_name,
+            metric_set_name="stuckBackgroundWakelockRateMetricSet",
+            metrics=["stuckBgWakelockRate", "distinctUsers", "stuckBgWakelockCount"],
+            dimensions=dimensions or [],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def list_vitals_anomalies(
+        self,
+        package_name: str,
+        filter_str: str | None = None,
+    ) -> "list[VitalsAnomaly]":
+        """List detected vitals anomalies for an app.
+
+        Anomalies are automatically detected degradations in any vitals metric.
+
+        Args:
+            package_name: App package name.
+            filter_str: Optional filter string, e.g. 'metric = crashRate'.
+
+        Returns:
+            List of VitalsAnomaly objects.
+        """
+        from play_store_mcp.models import VitalsAnomaly
+
+        service = self._get_reporting_service()
+        parent = f"apps/{package_name}"
+
+        self._logger.info("Listing vitals anomalies", package_name=package_name)
+
+        try:
+            kwargs: dict[str, Any] = {"parent": parent}
+            if filter_str:
+                kwargs["filter"] = filter_str
+
+            result = service.anomalies().list(**kwargs).execute()
+
+            anomalies = []
+            for a in result.get("anomalies", []):
+                dims: dict[str, str] = {}
+                for d in a.get("dimensions", []):
+                    key = d.get("dimension", "")
+                    val = d.get("stringValue") or d.get("int64Value", "")
+                    dims[key] = str(val)
+
+                first_time = a.get("firstDetectionTime")
+                first_str = self._parse_date(first_time) if first_time else None
+
+                last_day = a.get("lastDetectedDay")
+                last_str = self._parse_date(last_day) if last_day else None
+
+                anomalies.append(
+                    VitalsAnomaly(
+                        name=a.get("name", ""),
+                        metric_set=a.get("metricSet", "").replace("MetricSet", ""),
+                        dimensions=dims,
+                        first_detection_time=first_str,
+                        last_detected_day=last_str,
+                    )
+                )
+            return anomalies
+
+        except HttpError as e:
+            self._logger.exception("Failed to list anomalies", error=str(e))
+            raise PlayStoreClientError(f"Failed to list vitals anomalies: {e.reason}") from e

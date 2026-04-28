@@ -1506,6 +1506,246 @@ def revoke_subscription_v2(
 
 
 # =============================================================================
+# Play Developer Reporting API Tools (Vitals)
+# =============================================================================
+
+_VITALS_DIMENSIONS_HELP = (
+    "Optional list of dimensions to group by. Common values: "
+    "versionCode, apiLevel, deviceModel, deviceBrand, countryCode. "
+    "Default: no grouping (overall totals only)."
+)
+
+_VITALS_PERMISSION_NOTE = (
+    "Requires the service account to have 'Performance Analysis' permission "
+    "in Play Console (Account settings > Users and permissions)."
+)
+
+
+@mcp.tool()
+def get_crash_rate(
+    package_name: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    f"""Query daily crash rate from Play Developer Reporting API.
+
+    Returns crashRate (ratio of sessions with crash), crashCount, and distinctUsers
+    per day over the requested period.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format (exclusive — use tomorrow's date to include today)
+        dimensions: {_VITALS_DIMENSIONS_HELP}
+
+    Returns:
+        VitalsQueryResult with list of data_points containing date, metrics, dimensions
+    """
+    client = get_client_from_context()
+    result = client.get_crash_rate(
+        package_name=package_name,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_anr_rate(
+    package_name: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    f"""Query daily ANR (Application Not Responding) rate.
+
+    Returns anrRate (ratio of sessions with ANR), anrCount, and distinctUsers per day.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format (exclusive)
+        dimensions: {_VITALS_DIMENSIONS_HELP}
+
+    Returns:
+        VitalsQueryResult with list of data_points
+    """
+    client = get_client_from_context()
+    result = client.get_anr_rate(
+        package_name=package_name,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_slow_startup_rate(
+    package_name: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    f"""Query daily slow startup rate.
+
+    Returns slowStartupRate (ratio of slow cold starts), slowStartupCount, distinctUsers.
+    A cold start is considered slow if it takes > 5 seconds.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD (exclusive)
+        dimensions: {_VITALS_DIMENSIONS_HELP}
+
+    Returns:
+        VitalsQueryResult with list of data_points
+    """
+    client = get_client_from_context()
+    result = client.get_slow_startup_rate(
+        package_name=package_name,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_slow_rendering_rate(
+    package_name: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    f"""Query daily slow rendering (frame drop) rate.
+
+    Returns slowRenderingRate20Fps (frames rendered below 20fps) and
+    slowRenderingRate30Fps (frames rendered below 30fps), plus distinctUsers.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD (exclusive)
+        dimensions: {_VITALS_DIMENSIONS_HELP}
+
+    Returns:
+        VitalsQueryResult with list of data_points
+    """
+    client = get_client_from_context()
+    result = client.get_slow_rendering_rate(
+        package_name=package_name,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_excessive_wakeup_rate(
+    package_name: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    f"""Query daily excessive wakeup rate.
+
+    Returns excessiveWakeupRate (ratio of hours with > 10 wakeups/hour),
+    excessiveWakeupCount, and distinctUsers.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD (exclusive)
+        dimensions: {_VITALS_DIMENSIONS_HELP}
+
+    Returns:
+        VitalsQueryResult with list of data_points
+    """
+    client = get_client_from_context()
+    result = client.get_excessive_wakeup_rate(
+        package_name=package_name,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_stuck_wakelock_rate(
+    package_name: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+) -> dict[str, Any]:
+    f"""Query daily stuck background wakelock rate.
+
+    Returns stuckBgWakelockRate (ratio of hours where app holds wakelock > 1 hour),
+    stuckBgWakelockCount, and distinctUsers.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name
+        start_date: Start date YYYY-MM-DD
+        end_date: End date YYYY-MM-DD (exclusive)
+        dimensions: {_VITALS_DIMENSIONS_HELP}
+
+    Returns:
+        VitalsQueryResult with list of data_points
+    """
+    client = get_client_from_context()
+    result = client.get_stuck_wakelock_rate(
+        package_name=package_name,
+        start_date=start_date,
+        end_date=end_date,
+        dimensions=dimensions,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def list_vitals_anomalies(
+    package_name: str,
+    filter_str: str | None = None,
+) -> list[dict[str, Any]]:
+    f"""List automatically detected vitals anomalies for an app.
+
+    Anomalies are significant degradations in any vitals metric automatically
+    detected by Google Play. Useful for catching regressions.
+
+    {_VITALS_PERMISSION_NOTE}
+
+    Args:
+        package_name: App package name
+        filter_str: Optional filter, e.g. "metric = crashRate" or "metric = anrRate"
+
+    Returns:
+        List of anomalies with metric_set, dimensions, first_detection_time, last_detected_day
+    """
+    client = get_client_from_context()
+    anomalies = client.list_vitals_anomalies(
+        package_name=package_name,
+        filter_str=filter_str,
+    )
+    return [a.model_dump() for a in anomalies]
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 
