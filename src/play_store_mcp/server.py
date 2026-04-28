@@ -662,20 +662,27 @@ def update_testers(
     package_name: str,
     track: str,
     tester_emails: list[str],
+    google_group_emails: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Update testers for a specific testing track.
+    """Update the list of testers for a track.
 
     Args:
-        package_name: App package name
-        track: Track name (internal, alpha, beta)
-        tester_emails: List of tester email addresses or Google Group emails
+        package_name: App package name (e.g., com.example.myapp)
+        track: Track name - one of: internal, alpha, beta
+        tester_emails: List of individual tester email addresses
+        google_group_emails: Optional list of Google Group email addresses
 
     Returns:
         Update result with success status
     """
     client = get_client_from_context()
 
-    result = client.update_testers(package_name, track, tester_emails)
+    result = client.update_testers(
+        package_name=package_name,
+        track=track,
+        tester_emails=tester_emails,
+        google_group_emails=google_group_emails or [],
+    )
     return result.model_dump()
 
 
@@ -732,6 +739,73 @@ def get_expansion_file(
 
     expansion_file = client.get_expansion_file(package_name, version_code, expansion_file_type)
     return expansion_file.model_dump()
+
+
+@mcp.tool()
+def upload_deobfuscation_file(
+    package_name: str,
+    version_code: int,
+    file_path: str,
+    deobfuscation_file_type: str = "proguard",
+) -> dict[str, Any]:
+    """Upload a ProGuard/R8 deobfuscation mapping file for an APK version.
+
+    This enables human-readable crash stack traces in Play Console.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        version_code: APK version code to associate the mapping with
+        file_path: Absolute path to the mapping.txt file on this machine
+        deobfuscation_file_type: 'proguard' (default) or 'nativeCode'
+
+    Returns:
+        Upload result with success status
+    """
+    client = get_client_from_context()
+    result = client.upload_deobfuscation_file(
+        package_name=package_name,
+        version_code=version_code,
+        file_path=file_path,
+        deobfuscation_file_type=deobfuscation_file_type,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def list_bundles(package_name: str) -> list[dict[str, Any]]:
+    """List all AAB bundles uploaded for an app.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+
+    Returns:
+        List of bundle info with version_code, sha1, sha256
+    """
+    client = get_client_from_context()
+    bundles = client.list_bundles(package_name)
+    return [b.model_dump() for b in bundles]
+
+
+@mcp.tool()
+def list_generated_apks(
+    package_name: str,
+    bundle_version_code: int,
+) -> list[dict[str, Any]]:
+    """List APKs generated from a specific AAB bundle.
+
+    Args:
+        package_name: App package name (e.g., com.example.myapp)
+        bundle_version_code: Version code of the bundle to query
+
+    Returns:
+        List of generated APK info with download_id, variant_id, sdk versions
+    """
+    client = get_client_from_context()
+    apks = client.list_generated_apks(
+        package_name=package_name,
+        bundle_version_code=bundle_version_code,
+    )
+    return [a.model_dump() for a in apks]
 
 
 # =============================================================================

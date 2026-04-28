@@ -68,6 +68,36 @@ class TestGetReleases:
         assert beta_track.releases[0].rollout_percentage == 50.0
 
 
+class TestGetAppDetails:
+    """Test get_app_details method."""
+
+    def test_developer_name_is_not_website(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Bug: developer_name was incorrectly set to contactWebsite value."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.details.return_value.get.return_value.execute.return_value = {
+            "defaultLanguage": "en-US",
+            "contactEmail": "dev@example.com",
+            "contactWebsite": "https://example.com",
+        }
+        mock_edits.listings.return_value.get.return_value.execute.return_value = {
+            "title": "My App",
+            "shortDescription": "Short",
+            "fullDescription": "Full",
+        }
+        mock_edits.delete.return_value.execute.return_value = None
+
+        details = client.get_app_details("com.example.app")
+
+        assert details.developer_name is None
+        assert details.developer_website == "https://example.com"
+        assert details.developer_email == "dev@example.com"
+
+
 class TestDeployApp:
     """Test deploy_app method."""
 
@@ -426,20 +456,24 @@ class TestInAppProducts:
         assert product.status == "active"
 
 
-class TestVitalsMetrics:
-    """Test vitals metrics methods."""
+class TestVitalsStubs:
+    """Verify vitals methods raise clear errors rather than returning fake data."""
 
-    def test_get_vitals_metrics(
+    def test_get_vitals_overview_raises_not_implemented(
         self,
         client: PlayStoreClient,
+        _mock_service: MagicMock,
     ) -> None:
-        """Test getting vitals metrics."""
-        metrics = client.get_vitals_metrics("com.example.app", "crashRate")
+        with pytest.raises(PlayStoreClientError, match="Play Developer Reporting API"):
+            client.get_vitals_overview("com.example.app")
 
-        assert len(metrics) > 0
-        assert metrics[0].metric_type == "crashRate"
-        # Note: This is a placeholder implementation
-        assert "Requires Play Developer Reporting API" in str(metrics[0].dimension_value)
+    def test_get_vitals_metrics_raises_not_implemented(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        with pytest.raises(PlayStoreClientError, match="Play Developer Reporting API"):
+            client.get_vitals_metrics("com.example.app", "crashRate")
 
 
 class TestStoreListings:
@@ -567,6 +601,59 @@ class TestTesters:
         assert result.success is True
 
 
+class TestUpdateTesters:
+    """Test update_testers method."""
+
+    def test_individual_emails_go_to_testers_field(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Bug: individual tester emails must go into 'testers', not 'googleGroups'."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.testers.return_value.update.return_value.execute.return_value = {}
+        mock_edits.get.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.commit.return_value.execute.return_value = {}
+
+        result = client.update_testers(
+            package_name="com.example.app",
+            track="alpha",
+            tester_emails=["alice@example.com", "bob@example.com"],
+            google_group_emails=[],
+        )
+
+        assert result.success is True
+        call_kwargs = mock_edits.testers.return_value.update.call_args
+        body = call_kwargs.kwargs["body"]
+        assert body["testers"] == ["alice@example.com", "bob@example.com"]
+        assert body["googleGroups"] == []
+
+    def test_google_groups_go_to_googleGroups_field(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.testers.return_value.update.return_value.execute.return_value = {}
+        mock_edits.get.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.commit.return_value.execute.return_value = {}
+
+        result = client.update_testers(
+            package_name="com.example.app",
+            track="alpha",
+            tester_emails=[],
+            google_group_emails=["testers@example.com"],
+        )
+
+        assert result.success is True
+        call_kwargs = mock_edits.testers.return_value.update.call_args
+        body = call_kwargs.kwargs["body"]
+        assert body["testers"] == []
+        assert body["googleGroups"] == ["testers@example.com"]
+
+
 class TestOrders:
     """Test orders methods."""
 
@@ -613,6 +700,121 @@ class TestExpansionFiles:
         assert expansion.version_code == 100
         assert expansion.expansion_file_type == "main"
         assert expansion.file_size == 104857600
+
+
+class TestUploadDeobfuscationFile:
+    """Test upload_deobfuscation_file method."""
+
+    def test_upload_success(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        mapping_file = tmp_path / "mapping.txt"
+        mapping_file.write_text("obfuscated -> Original")
+
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.deobfuscationfiles.return_value.upload.return_value.execute.return_value = {
+            "deobfuscationFile": {"symbolType": "proguard"}
+        }
+        mock_edits.commit.return_value.execute.return_value = {}
+
+        result = client.upload_deobfuscation_file(
+            package_name="com.example.app",
+            version_code=100,
+            file_path=str(mapping_file),
+            deobfuscation_file_type="proguard",
+        )
+
+        assert result.success is True
+        assert result.version_code == 100
+        assert result.deobfuscation_file_type == "proguard"
+
+    def test_upload_file_not_found(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        result = client.upload_deobfuscation_file(
+            package_name="com.example.app",
+            version_code=100,
+            file_path="/nonexistent/mapping.txt",
+        )
+        assert result.success is False
+        assert "not found" in result.message.lower()
+
+
+class TestListBundles:
+    """Test list_bundles method."""
+
+    def test_list_bundles_success(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.bundles.return_value.list.return_value.execute.return_value = {
+            "bundles": [
+                {"versionCode": 100, "sha1": "abc123", "sha256": "def456"},
+                {"versionCode": 101, "sha1": "ghi789", "sha256": "jkl012"},
+            ]
+        }
+        mock_edits.delete.return_value.execute.return_value = None
+
+        bundles = client.list_bundles("com.example.app")
+
+        assert len(bundles) == 2
+        assert bundles[0].version_code == 100
+        assert bundles[0].sha1 == "abc123"
+        assert bundles[1].version_code == 101
+
+    def test_list_bundles_empty(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.bundles.return_value.list.return_value.execute.return_value = {}
+        mock_edits.delete.return_value.execute.return_value = None
+
+        bundles = client.list_bundles("com.example.app")
+        assert bundles == []
+
+
+class TestListGeneratedApks:
+    """Test list_generated_apks method."""
+
+    def test_list_generated_apks_success(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.generatedapks.return_value.list.return_value.execute.return_value = {
+            "generatedApks": [
+                {
+                    "downloadId": "download-abc",
+                    "variantId": 1,
+                    "targetSdkVersion": 33,
+                    "minSdkVersion": 21,
+                    "generatedSplitApks": [],
+                    "generatedUniversalApk": {},
+                }
+            ]
+        }
+        mock_edits.delete.return_value.execute.return_value = None
+
+        apks = client.list_generated_apks("com.example.app", bundle_version_code=100)
+
+        assert len(apks) == 1
+        assert apks[0].bundle_version_code == 100
+        assert apks[0].download_id == "download-abc"
+        assert apks[0].target_sdk_version == 33
 
 
 class TestValidation:

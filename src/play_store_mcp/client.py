@@ -22,9 +22,12 @@ from play_store_mcp.models import (
     AppDetailsUpdateResult,
     AppInfo,
     BatchDeploymentResult,
+    BundleInfo,
     CountryAvailability,
+    DeobfuscationFileResult,
     DeploymentResult,
     ExpansionFile,
+    GeneratedApkInfo,
     GrantInfo,
     ImageInfo,
     ImageUploadResult,
@@ -914,7 +917,7 @@ class PlayStoreClient:
                 short_description=listing.get("shortDescription"),
                 full_description=listing.get("fullDescription"),
                 default_language=details.get("defaultLanguage"),
-                developer_name=details.get("contactWebsite"),
+                developer_name=None,
                 developer_email=details.get("contactEmail"),
                 developer_website=details.get("contactWebsite"),
             )
@@ -1239,24 +1242,14 @@ class PlayStoreClient:
     def get_vitals_overview(self, package_name: str) -> VitalsOverview:
         """Get Android Vitals overview.
 
-        Note: The full Vitals API requires additional setup.
-        This provides a basic overview structure.
-
-        Args:
-            package_name: App package name.
-
-        Returns:
-            Vitals overview (may be partial without full API access).
+        Raises:
+            PlayStoreClientError: Always - requires separate Play Developer Reporting API
+                setup with additional scopes not supported by this MCP.
         """
-        self._logger.info("Getting vitals overview", package_name=package_name)
-
-        # The Vitals API is part of the Play Developer Reporting API
-        # which requires separate authentication/setup
-        # For now, return a placeholder that indicates where data would come from
-
-        return VitalsOverview(
-            package_name=package_name,
-            freshness_info="Vitals data requires Play Developer Reporting API access",
+        raise PlayStoreClientError(
+            "get_vitals_overview requires the Play Developer Reporting API "
+            "(playdeveloperreporting v1beta1), which is not yet implemented in this MCP. "
+            "Use the Google Play Console UI or set up the Reporting API separately."
         )
 
     def get_vitals_metrics(
@@ -1266,34 +1259,15 @@ class PlayStoreClient:
     ) -> list[VitalsMetric]:
         """Get specific Android Vitals metrics.
 
-        Note: Full implementation requires Play Developer Reporting API setup.
-        This is a placeholder implementation.
-
-        Args:
-            package_name: App package name.
-            metric_type: Type of metric (crashRate, anrRate, etc.).
-
-        Returns:
-            List of vitals metrics (placeholder).
+        Raises:
+            PlayStoreClientError: Always - requires separate Play Developer Reporting API
+                setup with additional scopes not supported by this MCP.
         """
-        self._logger.info(
-            "Getting vitals metrics",
-            package_name=package_name,
-            metric_type=metric_type,
+        raise PlayStoreClientError(
+            "get_vitals_metrics requires the Play Developer Reporting API "
+            "(playdeveloperreporting v1beta1), which is not yet implemented in this MCP. "
+            "Use the Google Play Console UI or set up the Reporting API separately."
         )
-
-        # The Play Developer Reporting API is separate and requires additional setup
-        # Return placeholder indicating this limitation
-        return [
-            VitalsMetric(
-                metric_type=metric_type,
-                value=None,
-                benchmark=None,
-                is_below_threshold=None,
-                dimension="api_level",
-                dimension_value="Requires Play Developer Reporting API access",
-            )
-        ]
 
     # =========================================================================
     # In-App Products API
@@ -1535,16 +1509,29 @@ class PlayStoreClient:
             )
 
             listings: list[Listing] = []
-            for listing_data in result.get("listings", []):
-                listings.append(
-                    Listing(
-                        language=listing_data.get("language", ""),
-                        title=listing_data.get("title"),
-                        full_description=listing_data.get("fullDescription"),
-                        short_description=listing_data.get("shortDescription"),
-                        video=listing_data.get("video"),
+            raw_listings = result.get("listings", [])
+            if isinstance(raw_listings, dict):
+                for language, listing_data in raw_listings.items():
+                    listings.append(
+                        Listing(
+                            language=language,
+                            title=listing_data.get("title"),
+                            full_description=listing_data.get("fullDescription"),
+                            short_description=listing_data.get("shortDescription"),
+                            video=listing_data.get("video"),
+                        )
                     )
-                )
+            else:
+                for listing_data in raw_listings:
+                    listings.append(
+                        Listing(
+                            language=listing_data.get("language", ""),
+                            title=listing_data.get("title"),
+                            full_description=listing_data.get("fullDescription"),
+                            short_description=listing_data.get("shortDescription"),
+                            video=listing_data.get("video"),
+                        )
+                    )
 
             return listings
         finally:
@@ -1595,22 +1582,28 @@ class PlayStoreClient:
         package_name: str,
         track: str,
         tester_emails: list[str],
+        google_group_emails: list[str] | None = None,
     ) -> ListingUpdateResult:
-        """Update testers for a specific track.
+        """Update the list of testers for a track.
 
         Args:
             package_name: App package name.
             track: Track name (internal, alpha, beta).
-            tester_emails: List of tester email addresses or Google Group emails.
+            tester_emails: List of individual tester email addresses.
+            google_group_emails: List of Google Group email addresses.
 
         Returns:
             Update result.
         """
+        if google_group_emails is None:
+            google_group_emails = []
+
         self._logger.info(
             "Updating testers",
             package_name=package_name,
             track=track,
-            count=len(tester_emails),
+            individual_count=len(tester_emails),
+            group_count=len(google_group_emails),
         )
         service = self._get_service()
         edit_id = self._create_edit(package_name)
@@ -1620,16 +1613,18 @@ class PlayStoreClient:
                 packageName=package_name,
                 editId=edit_id,
                 track=track,
-                body={"googleGroups": tester_emails},
+                body={"testers": tester_emails, "googleGroups": google_group_emails},
             ).execute()
 
             self._commit_edit(package_name, edit_id)
 
+            total = len(tester_emails) + len(google_group_emails)
+
             return ListingUpdateResult(
                 success=True,
                 package_name=package_name,
-                language=track,  # Reusing field for track
-                message=f"Successfully updated {len(tester_emails)} testers for {track}",
+                language=track,
+                message=f"Successfully updated {total} testers for {track}",
             )
 
         except HttpError as e:
@@ -1733,6 +1728,196 @@ class PlayStoreClient:
                 )
             self._logger.exception("Failed to get expansion file", error=str(e))
             raise PlayStoreClientError(f"Failed to get expansion file: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def upload_deobfuscation_file(
+        self,
+        package_name: str,
+        version_code: int,
+        file_path: str,
+        deobfuscation_file_type: str = "proguard",
+    ) -> DeobfuscationFileResult:
+        """Upload a deobfuscation (ProGuard/R8) mapping file for an APK version.
+
+        Args:
+            package_name: App package name.
+            version_code: APK version code to associate the mapping with.
+            file_path: Absolute path to the mapping.txt file.
+            deobfuscation_file_type: Type of mapping file - 'proguard' or 'nativeCode'.
+
+        Returns:
+            Upload result.
+        """
+        self._logger.info(
+            "Uploading deobfuscation file",
+            package_name=package_name,
+            version_code=version_code,
+            file_path=file_path,
+            type=deobfuscation_file_type,
+        )
+
+        if not os.path.isfile(file_path):
+            return DeobfuscationFileResult(
+                success=False,
+                package_name=package_name,
+                version_code=version_code,
+                deobfuscation_file_type=deobfuscation_file_type,
+                message=f"File not found: {file_path}",
+            )
+
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            media = MediaFileUpload(
+                file_path,
+                mimetype="application/octet-stream",
+                resumable=False,
+            )
+            service.edits().deobfuscationfiles().upload(
+                packageName=package_name,
+                editId=edit_id,
+                apkVersionCode=version_code,
+                deobfuscationFileType=deobfuscation_file_type,
+                media_body=media,
+            ).execute()
+
+            self._commit_edit(package_name, edit_id)
+
+            return DeobfuscationFileResult(
+                success=True,
+                package_name=package_name,
+                version_code=version_code,
+                deobfuscation_file_type=deobfuscation_file_type,
+                message=(
+                    f"Successfully uploaded {deobfuscation_file_type} mapping "
+                    f"for version {version_code}"
+                ),
+            )
+
+        except HttpError as e:
+            self._logger.exception("Failed to upload deobfuscation file", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return DeobfuscationFileResult(
+                success=False,
+                package_name=package_name,
+                version_code=version_code,
+                deobfuscation_file_type=deobfuscation_file_type,
+                message=f"Failed to upload deobfuscation file: {e.reason}",
+                error=str(e),
+            )
+        except Exception as e:
+            self._logger.exception("Failed to upload deobfuscation file", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return DeobfuscationFileResult(
+                success=False,
+                package_name=package_name,
+                version_code=version_code,
+                deobfuscation_file_type=deobfuscation_file_type,
+                message=f"Failed to upload deobfuscation file: {e}",
+                error=str(e),
+            )
+
+    def list_bundles(self, package_name: str) -> list[BundleInfo]:
+        """List all AAB bundles for the app.
+
+        Args:
+            package_name: App package name.
+
+        Returns:
+            List of bundle information objects.
+        """
+        self._logger.info("Listing bundles", package_name=package_name)
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            result = (
+                service.edits()
+                .bundles()
+                .list(packageName=package_name, editId=edit_id)
+                .execute()
+            )
+
+            bundles = []
+            for b in result.get("bundles", []):
+                bundles.append(
+                    BundleInfo(
+                        package_name=package_name,
+                        version_code=int(b.get("versionCode", 0)),
+                        sha1=b.get("sha1"),
+                        sha256=b.get("sha256"),
+                    )
+                )
+            return bundles
+
+        except HttpError as e:
+            self._logger.exception("Failed to list bundles", error=str(e))
+            raise PlayStoreClientError(f"Failed to list bundles: {e.reason}") from e
+        finally:
+            self._delete_edit(package_name, edit_id)
+
+    def list_generated_apks(
+        self,
+        package_name: str,
+        bundle_version_code: int,
+    ) -> list[GeneratedApkInfo]:
+        """List APKs generated from a specific AAB bundle version.
+
+        Args:
+            package_name: App package name.
+            bundle_version_code: Version code of the bundle to query.
+
+        Returns:
+            List of generated APK info objects.
+        """
+        self._logger.info(
+            "Listing generated APKs",
+            package_name=package_name,
+            bundle_version_code=bundle_version_code,
+        )
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+
+        try:
+            result = (
+                service.edits()
+                .generatedapks()
+                .list(
+                    packageName=package_name,
+                    editId=edit_id,
+                    versionCode=bundle_version_code,
+                )
+                .execute()
+            )
+
+            apks = []
+            for apk in result.get("generatedApks", []):
+                split_types = []
+                if apk.get("generatedSplitApks"):
+                    split_types.append("splits")
+                if apk.get("generatedUniversalApk"):
+                    split_types.append("universal")
+                if apk.get("generatedStandaloneApks"):
+                    split_types.append("standalone")
+
+                apks.append(
+                    GeneratedApkInfo(
+                        package_name=package_name,
+                        bundle_version_code=bundle_version_code,
+                        download_id=apk.get("downloadId"),
+                        variant_id=apk.get("variantId"),
+                        target_sdk_version=apk.get("targetSdkVersion"),
+                        min_sdk_version=apk.get("minSdkVersion"),
+                        split_types=split_types,
+                    )
+                )
+            return apks
+
+        except HttpError as e:
+            self._logger.exception("Failed to list generated APKs", error=str(e))
+            raise PlayStoreClientError(f"Failed to list generated APKs: {e.reason}") from e
         finally:
             self._delete_edit(package_name, edit_id)
 

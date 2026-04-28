@@ -276,6 +276,38 @@ class ImageUploadResult(BaseModel):
     error: str | None = Field(None, description="Error details if failed")
 
 
+class DeobfuscationFileResult(BaseModel):
+    """Result of uploading a deobfuscation (ProGuard/R8) mapping file."""
+
+    success: bool = Field(..., description="Whether upload succeeded")
+    package_name: str = Field(..., description="App package name")
+    version_code: int = Field(..., description="APK version code")
+    deobfuscation_file_type: str = Field(..., description="Type: proguard or nativeCode")
+    message: str = Field(..., description="Status message")
+    error: str | None = Field(None, description="Error details if failed")
+
+
+class BundleInfo(BaseModel):
+    """Information about an uploaded AAB bundle."""
+
+    package_name: str = Field(..., description="App package name")
+    version_code: int = Field(..., description="Version code of the bundle")
+    sha1: str | None = Field(None, description="SHA1 hash of the bundle")
+    sha256: str | None = Field(None, description="SHA256 hash of the bundle")
+
+
+class GeneratedApkInfo(BaseModel):
+    """Information about a generated APK from an AAB bundle."""
+
+    package_name: str = Field(..., description="App package name")
+    bundle_version_code: int = Field(..., description="Version code of the source bundle")
+    download_id: str | None = Field(None, description="Download ID for the generated APK")
+    variant_id: int | None = Field(None, description="Variant ID")
+    target_sdk_version: int | None = Field(None, description="Target SDK version")
+    min_sdk_version: int | None = Field(None, description="Minimum SDK version")
+    split_types: list[str] = Field(default_factory=list, description="List of split types")
+
+
 # =============================================================================
 # App Details Models
 # =============================================================================
