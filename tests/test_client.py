@@ -926,12 +926,18 @@ class TestBrowserStats:
         return PlayStoreClient(credentials_path="/nonexistent/path.json")
 
     def test_get_search_terms_success(self, bare_client: PlayStoreClient) -> None:
+        # Response format from getAcquisitionDetailsTableData with dimension type 2 (search term).
+        # "1" = outer wrapper; "3" = list of rows;
+        # each row: "1"={"1":term_id,"2":display}, "2"={"1":visitors}, "3"={"1":installs}
         response = {
-            "1": [
-                {"1": "puzzle game", "2": [{"1": 42}, {"1": 120}]},
-                {"1": "brain teaser", "2": [{"1": 15}, {"1": 60}]},
-                {"1": "word game", "2": [{"1": 28}, {"1": 95}]},
-            ]
+            "1": {
+                "1": 2,
+                "3": [
+                    {"1": {"1": "puzzle game", "2": "puzzle game"}, "2": {"1": "120"}, "3": {"1": "42"}},
+                    {"1": {"1": "brain teaser", "2": "brain teaser"}, "2": {"1": "60"}, "3": {"1": "15"}},
+                    {"1": {"1": "word game", "2": "word game"}, "2": {"1": "95"}, "3": {"1": "28"}},
+                ],
+            }
         }
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(response), stderr="")
@@ -985,13 +991,20 @@ class TestBrowserStats:
                 )
 
     def test_get_acquisition_funnel_success(self, bare_client: PlayStoreClient) -> None:
+        # Response format from getAcquisitionSummary (live reverse-engineered):
+        # "1" = traffic source array; "2" = conversion summary (visitors, installers, rate)
         response = {
             "1": [
-                {"1": 1, "2": 10000},
-                {"1": 2, "2": 3000},
-                {"1": 3, "2": 500},
-                {"1": 4, "2": 50},
-            ]
+                {"1": {"1": "@OVERALL@"}, "2": {"1": "22"}},
+                {"1": {"1": "STORE_SEARCH", "2": "Google Play search"}, "2": {"1": "9"}},
+                {"1": {"1": "STORE_BROWSE", "2": "Google Play explore"}, "2": {"1": "8"}},
+                {"1": {"1": "DEEPLINK", "2": "Ads and referrals"}, "2": {"1": "5"}},
+            ],
+            "2": {
+                "1": {"1": "177"},
+                "2": {"1": "22"},
+                "3": {"1": 0.12429378531073447},
+            },
         }
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(response), stderr="")
@@ -1004,18 +1017,17 @@ class TestBrowserStats:
             )
 
         assert result.package_name == "com.vast.jujubit"
-        assert len(result.stages) == 4
-        assert result.stages[0].stage == "impressions"
-        assert result.stages[0].value == 10000
+        # 2 funnel stages + 3 traffic source breakdown stages
+        assert len(result.stages) == 5
+        assert result.stages[0].stage == "store_listing_visitors"
+        assert result.stages[0].value == 177
         assert result.stages[0].conversion_rate == 0.0
-        assert result.stages[1].stage == "store_listing_visitors"
-        assert result.stages[1].value == 3000
-        assert result.stages[1].conversion_rate == 0.3
-        assert result.stages[2].stage == "installers"
-        assert result.stages[2].value == 500
-        assert round(result.stages[2].conversion_rate, 4) == round(500 / 3000, 4)
-        assert result.stages[3].stage == "buyers"
-        assert result.stages[3].value == 50
+        assert result.stages[1].stage == "installers"
+        assert result.stages[1].value == 22
+        assert result.stages[1].conversion_rate == round(0.12429378531073447, 4)
+        # Traffic source breakdown
+        assert result.stages[2].stage == "src:search"
+        assert result.stages[2].value == 9
 
     def test_get_acquisition_funnel_empty(self, bare_client: PlayStoreClient) -> None:
         with patch("subprocess.run") as mock_run:
@@ -1027,7 +1039,8 @@ class TestBrowserStats:
                 start_date="2024-01-01",
                 end_date="2024-01-31",
             )
-        assert result.stages == []
+        assert result.stages[0].stage == "store_listing_visitors"
+        assert result.stages[0].value == 0
 
     def test_get_acquisition_funnel_browser_error(self, bare_client: PlayStoreClient) -> None:
         with patch("subprocess.run") as mock_run:

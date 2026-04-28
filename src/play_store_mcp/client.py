@@ -3508,6 +3508,8 @@ class PlayStoreClient:
 
         self._logger.info("Fetching search terms via browser", package_name=package_name)
 
+        # Uses getAcquisitionDetailsTableData with dimension type 2 (Search term).
+        # Note: low-volume apps may only return "Other" due to Google's privacy threshold.
         js = f"""
 (async function() {{
   const SAPISID = document.cookie.match(/SAPISID=([^;]+)/)?.[1];
@@ -3521,8 +3523,8 @@ class PlayStoreClient:
   const APP_ID = '{app_id}';
   const API_KEY = 'AIzaSyBAha_rcoO_aGsmiR5fWbNfdOjqT0gXwbk';
   const httpHeaders = 'Content-Type:application/json+protobuf\\r\\nX-Goog-AuthUser:0\\r\\nAuthorization:' + auth + '\\r\\nX-Goog-Api-Key:' + API_KEY + '\\r\\n';
-  const url = 'https://playconsolestatsfrontend-pa.clients6.google.com/v1/developers/' + DEV_ID + '/apps/' + APP_ID + '/statspage/top_dimension_values?$httpHeaders=' + encodeURIComponent(httpHeaders);
-  const body = JSON.stringify({{'1':{{'1':{{'1':DEV_ID}},'2':{{'1':APP_ID}}}},'2':{{'1':{{'1':{sy},'2':{sm},'3':{sd}}},'2':{{'1':{ey},'2':{em},'3':{ed}}}}},'3':{{'1':{{'1':1,'2':1,'3':1,'4':1}},'2':2}},'4':4,'5':50}});
+  const url = 'https://playconsolestatsfrontend-pa.clients6.google.com/v1/developers/' + DEV_ID + '/apps/' + APP_ID + '/stats/acquisition:getAcquisitionDetailsTableData?$httpHeaders=' + encodeURIComponent(httpHeaders);
+  const body = JSON.stringify({{'1':{{'1':{{'1':DEV_ID}},'2':{{'1':APP_ID}}}},'2':{{'1':{{'1':{sy},'2':{sm},'3':{sd}}},'2':{{'1':{ey},'2':{em},'3':{ed}}}}},'3':{{'1':2}},'5':1}});
   const resp = await fetch(url, {{method:'POST', body:body, credentials:'include'}});
   const data = await resp.json();
   return JSON.stringify(data);
@@ -3537,14 +3539,21 @@ class PlayStoreClient:
         if "error" in data:
             raise PlayStoreClientError(f"Browser error: {data['error']}")
 
-        # Response field "1" contains list of dimension value rows.
-        # Each row: "1"=search term string, "2"=metrics list (installs at index 0, visitors at index 1).
+        # Response: data["1"]["3"] = list of search term rows.
+        # Each row: "1"={"1": term_id, "2": display_name}, "2"={"1": visitors}, "3"={"1": installs}.
+        # Row "1"."1" == "REMOVED_BY_THRESHOLDING_STORE_QUERY" means data below privacy threshold.
         terms: list[SearchTermResult] = []
-        for row in data.get("1", []):
-            term_str = row.get("1", "")
-            metrics = row.get("2", [])
-            installs = int(metrics[0].get("1") or 0) if len(metrics) > 0 else 0
-            visitors = int(metrics[1].get("1") or 0) if len(metrics) > 1 else 0
+        inner = data.get("1", {})
+        for row in inner.get("3", []):
+            label = row.get("1", {})
+            term_id = label.get("1", "")
+            term_display = label.get("2", term_id)
+            if term_id == "REMOVED_BY_THRESHOLDING_STORE_QUERY":
+                term_str = f"(other: {term_display})"
+            else:
+                term_str = term_display or term_id
+            visitors = int(row.get("2", {}).get("1") or 0)
+            installs = int(row.get("3", {}).get("1") or 0)
             if term_str:
                 terms.append(SearchTermResult(term=term_str, installs=installs, store_listing_visitors=visitors))
 
@@ -3620,22 +3629,33 @@ class PlayStoreClient:
         if "error" in data:
             raise PlayStoreClientError(f"Browser error: {data['error']}")
 
-        # Response field "1" contains funnel stages in order.
-        # Each stage: "1"=stage type int (1=impressions,2=visitors,3=installers,4=buyers), "2"=value.
-        stage_names = {1: "impressions", 2: "store_listing_visitors", 3: "installers", 4: "buyers"}
-        raw_stages = data.get("1", [])
+        # Response structure (from live reverse-engineering):
+        #   "1" = array of traffic sources: [overall, STORE_SEARCH, STORE_BROWSE, DEEPLINK, ...]
+        #         each: "1"."1"=source_id, "2"."1"=install_count
+        #   "2" = conversion summary:
+        #         "2"."1"."1" = store_listing_visitors (total)
+        #         "2"."2"."1" = installers (total)
+        #         "2"."3"."1" = conversion_rate (float)
+        # We build a 2-stage funnel from "2" plus the traffic-source breakdown from "1".
+        summary = data.get("2", {})
+        visitors_val = int(summary.get("1", {}).get("1") or 0)
+        installers_val = int(summary.get("2", {}).get("1") or 0)
+        conversion_val = float(summary.get("3", {}).get("1") or 0.0)
 
-        stages: list[AcquisitionFunnelStage] = []
-        prev_value: int | None = None
-        for s in raw_stages:
-            stage_type = int(s.get("1") or 0)
-            value = int(s.get("2") or 0)
-            name = stage_names.get(stage_type, f"stage_{stage_type}")
-            conversion = 0.0
-            if prev_value and prev_value > 0:
-                conversion = value / prev_value
-            stages.append(AcquisitionFunnelStage(stage=name, value=value, conversion_rate=round(conversion, 4)))
-            prev_value = value
+        stages: list[AcquisitionFunnelStage] = [
+            AcquisitionFunnelStage(stage="store_listing_visitors", value=visitors_val, conversion_rate=0.0),
+            AcquisitionFunnelStage(stage="installers", value=installers_val, conversion_rate=round(conversion_val, 4)),
+        ]
+
+        # Append traffic-source breakdown as additional pseudo-stages (source@installs).
+        source_map = {"STORE_SEARCH": "search", "STORE_BROWSE": "explore", "DEEPLINK": "ads_referral"}
+        for src_item in data.get("1", []):
+            src_id = src_item.get("1", {}).get("1", "")
+            src_count = int(src_item.get("2", {}).get("1") or 0)
+            if src_id and src_id != "@OVERALL@":
+                label = source_map.get(src_id, src_id.lower())
+                conv = round(src_count / installers_val, 4) if installers_val > 0 else 0.0
+                stages.append(AcquisitionFunnelStage(stage=f"src:{label}", value=src_count, conversion_rate=conv))
 
         return AcquisitionFunnelResult(
             package_name=package_name,
