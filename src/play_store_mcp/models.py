@@ -200,6 +200,25 @@ class ListingUpdateResult(BaseModel):
     error: str | None = Field(None, description="Error details if failed")
 
 
+class ListingBatchUpdateResult(BaseModel):
+    """Result of validating or updating multiple store listings."""
+
+    success: bool = Field(..., description="Whether validation/update succeeded")
+    package_name: str = Field(..., description="App package name")
+    commit: bool = Field(..., description="Whether changes were committed")
+    edit_id: str | None = Field(None, description="Edit ID used for committed updates")
+    validated_languages: list[str] = Field(
+        default_factory=list, description="Languages that passed validation"
+    )
+    updated_languages: list[str] = Field(
+        default_factory=list, description="Languages updated when commit is true"
+    )
+    errors: list[dict[str, Any]] = Field(
+        default_factory=list, description="Validation or update errors by language"
+    )
+    message: str = Field(..., description="Status message")
+
+
 class TesterInfo(BaseModel):
     """Information about testers for a track."""
 

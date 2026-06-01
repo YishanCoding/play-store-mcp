@@ -973,7 +973,7 @@ class TestValidationExtended:
     def test_validate_all_listing_text_too_long(self, client: PlayStoreClient) -> None:
         """Test validating all listing text fields too long."""
         errors = client.validate_listing_text(
-            title="A" * 51,
+            title="A" * 31,
             short_description="B" * 81,
             full_description="C" * 4001,
         )

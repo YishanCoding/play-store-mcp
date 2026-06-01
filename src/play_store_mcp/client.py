@@ -18,20 +18,18 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from play_store_mcp.models import (
+    AcquisitionFunnelResult,
+    AcquisitionFunnelStage,
     AppDetails,
     AppDetailsInfo,
     AppDetailsUpdateResult,
     AppInfo,
     BatchDeploymentResult,
     BundleInfo,
-    AcquisitionFunnelResult,
-    AcquisitionFunnelStage,
     ConsoleInstallStats,
     ConsoleStatsResult,
     CountryAvailability,
     DailyStatPoint,
-    SearchTermResult,
-    SearchTermsStats,
     DeobfuscationFileResult,
     DeploymentResult,
     ExpansionFile,
@@ -41,6 +39,7 @@ from play_store_mcp.models import (
     ImageUploadResult,
     InAppProduct,
     Listing,
+    ListingBatchUpdateResult,
     ListingUpdateResult,
     Order,
     ProductPurchase,
@@ -48,6 +47,8 @@ from play_store_mcp.models import (
     Release,
     Review,
     ReviewReplyResult,
+    SearchTermResult,
+    SearchTermsStats,
     SubscriptionProduct,
     SubscriptionPurchase,
     SubscriptionPurchaseV2,
@@ -228,7 +229,7 @@ class PlayStoreClient:
         """Validate store listing text lengths.
 
         Args:
-            title: App title (max 50 chars).
+            title: App title (max 30 chars).
             short_description: Short description (max 80 chars).
             full_description: Full description (max 4000 chars).
 
@@ -237,11 +238,11 @@ class PlayStoreClient:
         """
         errors: list[ValidationError] = []
 
-        if title and len(title) > 50:
+        if title and len(title) > 30:
             errors.append(
                 ValidationError(
                     field="title",
-                    message="Title must be 50 characters or less",
+                    message="Title must be 30 characters or less",
                     value=f"{len(title)} characters",
                 )
             )
@@ -1473,7 +1474,7 @@ class PlayStoreClient:
         Args:
             package_name: App package name.
             language: Language code (e.g., en-US, es-ES).
-            title: App title (max 50 characters).
+            title: App title (max 30 characters).
             full_description: Full description (max 4000 characters).
             short_description: Short description (max 80 characters).
             video: YouTube video URL.
@@ -1553,6 +1554,171 @@ class PlayStoreClient:
                 language=language,
                 message=f"Failed to update listing: {e}",
                 error=str(e),
+            )
+
+    def batch_update_listings(
+        self,
+        package_name: str,
+        updates: list[dict[str, Any]],
+        commit: bool = False,
+    ) -> ListingBatchUpdateResult:
+        """Validate or update store listings for multiple languages.
+
+        Dry-run is the default and performs local validation only. A Google Play
+        edit is created only when commit is explicitly true and all inputs pass
+        validation.
+
+        Args:
+            package_name: App package name.
+            updates: Listing updates. Each item must include language and may
+                include title, short_description, full_description, and video.
+            commit: If true, apply and commit all updates in one edit.
+
+        Returns:
+            Batch validation/update result.
+        """
+        errors: list[dict[str, Any]] = []
+        validated_languages: list[str] = []
+        normalized_updates: list[dict[str, Any]] = []
+
+        for index, update in enumerate(updates):
+            language = update.get("language")
+            if not isinstance(language, str) or not language:
+                errors.append(
+                    {
+                        "index": index,
+                        "language": language,
+                        "field": "language",
+                        "message": "language is required",
+                    }
+                )
+                continue
+
+            provided_fields = {
+                field: update[field]
+                for field in ("title", "short_description", "full_description", "video")
+                if field in update
+            }
+            if not provided_fields:
+                errors.append(
+                    {
+                        "index": index,
+                        "language": language,
+                        "field": "updates",
+                        "message": "At least one listing field must be provided",
+                    }
+                )
+                continue
+
+            validation_errors = self.validate_listing_text(
+                title=update.get("title"),
+                short_description=update.get("short_description"),
+                full_description=update.get("full_description"),
+            )
+            if validation_errors:
+                for validation_error in validation_errors:
+                    error_data = validation_error.model_dump()
+                    error_data["index"] = index
+                    error_data["language"] = language
+                    errors.append(error_data)
+                continue
+
+            validated_languages.append(language)
+            normalized_updates.append({"language": language, **provided_fields})
+
+        if errors:
+            return ListingBatchUpdateResult(
+                success=False,
+                package_name=package_name,
+                commit=False,
+                validated_languages=validated_languages,
+                errors=errors,
+                message="Listing batch validation failed; no edit was created.",
+            )
+
+        if not commit:
+            return ListingBatchUpdateResult(
+                success=True,
+                package_name=package_name,
+                commit=False,
+                validated_languages=validated_languages,
+                message="Listing batch dry-run passed; no edit was created.",
+            )
+
+        service = self._get_service()
+        edit_id = self._create_edit(package_name)
+        updated_languages: list[str] = []
+
+        try:
+            for update in normalized_updates:
+                language = update["language"]
+                try:
+                    current_listing = (
+                        service.edits()
+                        .listings()
+                        .get(packageName=package_name, editId=edit_id, language=language)
+                        .execute()
+                    )
+                except HttpError:
+                    current_listing = {}
+
+                update_body = {
+                    "title": update.get("title", current_listing.get("title", "")),
+                    "fullDescription": update.get(
+                        "full_description", current_listing.get("fullDescription", "")
+                    ),
+                    "shortDescription": update.get(
+                        "short_description", current_listing.get("shortDescription", "")
+                    ),
+                }
+                if "video" in update:
+                    update_body["video"] = update["video"]
+                elif current_listing.get("video") is not None:
+                    update_body["video"] = current_listing["video"]
+
+                service.edits().listings().update(
+                    packageName=package_name,
+                    editId=edit_id,
+                    language=language,
+                    body=update_body,
+                ).execute()
+                updated_languages.append(language)
+
+            self._commit_edit(package_name, edit_id)
+            return ListingBatchUpdateResult(
+                success=True,
+                package_name=package_name,
+                commit=True,
+                edit_id=edit_id,
+                validated_languages=validated_languages,
+                updated_languages=updated_languages,
+                message=f"Successfully updated {len(updated_languages)} listing(s).",
+            )
+        except HttpError as e:
+            self._logger.exception("Failed to batch update listings", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return ListingBatchUpdateResult(
+                success=False,
+                package_name=package_name,
+                commit=False,
+                edit_id=edit_id,
+                validated_languages=validated_languages,
+                updated_languages=updated_languages,
+                errors=[{"message": f"Failed to batch update listings: {e.reason}"}],
+                message="Failed to batch update listings; edit was deleted.",
+            )
+        except Exception as e:
+            self._logger.exception("Failed to batch update listings", error=str(e))
+            self._delete_edit(package_name, edit_id)
+            return ListingBatchUpdateResult(
+                success=False,
+                package_name=package_name,
+                commit=False,
+                edit_id=edit_id,
+                validated_languages=validated_languages,
+                updated_languages=updated_languages,
+                errors=[{"message": f"Failed to batch update listings: {e}"}],
+                message="Failed to batch update listings; edit was deleted.",
             )
 
     def list_all_listings(self, package_name: str) -> list[Listing]:

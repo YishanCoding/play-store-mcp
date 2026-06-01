@@ -560,6 +560,92 @@ class TestStoreListings:
         assert any(listing.language == "en-US" for listing in listings)
         assert any(listing.language == "es-ES" for listing in listings)
 
+    def test_batch_update_listings_dry_run_does_not_create_edit(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test dry-run validates multiple listings without creating an edit."""
+        result = client.batch_update_listings(
+            package_name="com.example.app",
+            updates=[
+                {"language": "en-US", "title": "New Title"},
+                {"language": "es-ES", "short_description": "Nueva descripcion"},
+            ],
+        )
+
+        assert result.success is True
+        assert result.commit is False
+        assert result.validated_languages == ["en-US", "es-ES"]
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_batch_update_listings_validation_error_blocks_edit(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test invalid batch input fails before any edit is created."""
+        result = client.batch_update_listings(
+            package_name="com.example.app",
+            updates=[{"language": "en-US", "title": "A" * 31}],
+            commit=True,
+        )
+
+        assert result.success is False
+        assert result.commit is False
+        assert result.errors[0]["field"] == "title"
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_batch_update_listings_commit_multiple_languages(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test committing multiple locale listing updates in one edit."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.listings.return_value.get.return_value.execute.side_effect = [
+            {
+                "title": "Old Title",
+                "fullDescription": "Old full",
+                "shortDescription": "Old short",
+                "video": "https://youtu.be/old",
+            },
+            {
+                "title": "Titulo viejo",
+                "fullDescription": "Descripcion vieja",
+                "shortDescription": "Corta vieja",
+            },
+        ]
+        mock_edits.listings.return_value.update.return_value.execute.return_value = {}
+        mock_edits.commit.return_value.execute.return_value = {}
+
+        result = client.batch_update_listings(
+            package_name="com.example.app",
+            updates=[
+                {"language": "en-US", "title": "New Title"},
+                {"language": "es-ES", "short_description": "Nueva corta"},
+            ],
+            commit=True,
+        )
+
+        assert result.success is True
+        assert result.commit is True
+        assert result.edit_id == "edit-123"
+        assert result.updated_languages == ["en-US", "es-ES"]
+        assert mock_edits.listings.return_value.update.call_count == 2
+        first_update = mock_edits.listings.return_value.update.call_args_list[0].kwargs
+        assert first_update["language"] == "en-US"
+        assert first_update["body"]["title"] == "New Title"
+        assert first_update["body"]["fullDescription"] == "Old full"
+        assert first_update["body"]["shortDescription"] == "Old short"
+        assert first_update["body"]["video"] == "https://youtu.be/old"
+        second_update = mock_edits.listings.return_value.update.call_args_list[1].kwargs
+        assert second_update["language"] == "es-ES"
+        assert second_update["body"]["title"] == "Titulo viejo"
+        assert second_update["body"]["shortDescription"] == "Nueva corta"
+        mock_edits.commit.assert_called_once_with(packageName="com.example.app", editId="edit-123")
+
 
 class TestTesters:
     """Test testers management methods."""
@@ -881,9 +967,17 @@ class TestValidation:
         client: PlayStoreClient,
     ) -> None:
         """Test validating title that's too long."""
-        errors = client.validate_listing_text(title="A" * 51)
+        errors = client.validate_listing_text(title="A" * 31)
         assert len(errors) > 0
         assert any("title" in e.field.lower() for e in errors)
+
+    def test_validate_listing_text_title_at_limit(
+        self,
+        client: PlayStoreClient,
+    ) -> None:
+        """Test validating title at the 30 character limit."""
+        errors = client.validate_listing_text(title="A" * 30)
+        assert len(errors) == 0
 
 
 class TestBatchOperations:

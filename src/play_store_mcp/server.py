@@ -595,7 +595,7 @@ def update_listing(
     Args:
         package_name: App package name
         language: Language code (e.g., en-US, es-ES, fr-FR)
-        title: App title (max 50 characters, optional)
+        title: App title (max 30 characters, optional)
         full_description: Full description (max 4000 characters, optional)
         short_description: Short description (max 80 characters, optional)
         video: YouTube video URL (optional)
@@ -612,6 +612,37 @@ def update_listing(
         full_description=full_description,
         short_description=short_description,
         video=video,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def batch_update_listings(
+    package_name: str,
+    updates: list[dict[str, Any]],
+    commit: bool = False,
+) -> dict[str, Any]:
+    """Validate or update store listings for multiple languages.
+
+    This tool is dry-run by default: it validates all requested listing text
+    locally and does not create a Google Play edit unless commit is explicitly
+    set to true.
+
+    Args:
+        package_name: App package name
+        updates: Items with language plus optional title, short_description,
+            full_description, and video fields
+        commit: If true, create one edit, update all locales, and commit it
+
+    Returns:
+        Batch validation/update result
+    """
+    client = get_client_from_context()
+
+    result = client.batch_update_listings(
+        package_name=package_name,
+        updates=updates,
+        commit=commit,
     )
     return result.model_dump()
 
@@ -862,7 +893,7 @@ def validate_listing_text(
     """Validate store listing text lengths before updating.
 
     Args:
-        title: App title (max 50 characters)
+        title: App title (max 30 characters)
         short_description: Short description (max 80 characters)
         full_description: Full description (max 4000 characters)
 

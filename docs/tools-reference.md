@@ -20,6 +20,7 @@ Complete reference for all MCP tools provided by the Play Store MCP server.
 |---|---|
 | [`get_listing`](tools/store-listings.md#get_listing) | Get store listing for a language |
 | [`update_listing`](tools/store-listings.md#update_listing) | Update store listing text and video |
+| [`batch_update_listings`](tools/store-listings.md#batch_update_listings) | Dry-run or commit listing updates across languages |
 | [`list_all_listings`](tools/store-listings.md#list_all_listings) | List all store listings across languages |
 
 ## Review Tools

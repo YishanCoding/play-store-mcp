@@ -5,7 +5,7 @@ Tools for managing app store listings across languages.
 !!! info "Text Limits"
     | Field | Max Length |
     |---|---|
-    | Title | 50 characters |
+    | Title | 30 characters |
     | Short description | 80 characters |
     | Full description | 4,000 characters |
 
@@ -38,7 +38,7 @@ Update the store listing for a specific language. Only provided fields are updat
 |---|---|---|---|
 | `package_name` | string | Yes | App package name |
 | `language` | string | Yes | Language code |
-| `title` | string | No | App title (max 50 chars) |
+| `title` | string | No | App title (max 30 chars) |
 | `full_description` | string | No | Full description (max 4,000 chars) |
 | `short_description` | string | No | Short description (max 80 chars) |
 | `video` | string | No | YouTube video URL |
@@ -52,6 +52,35 @@ update_listing(
     full_description="A comprehensive productivity app that helps you..."
 )
 ```
+
+---
+
+## batch_update_listings
+
+Validate or update store listings for multiple languages. This tool is a dry-run by default:
+it validates all requested text locally and does not create a Google Play edit unless
+`commit=True` is explicitly set.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `package_name` | string | Yes | — | App package name |
+| `updates` | list | Yes | — | Listing updates by language |
+| `commit` | boolean | No | `False` | Commit changes to Google Play when true |
+
+Each `updates` item must include `language` and may include any of `title`,
+`short_description`, `full_description`, and `video`.
+
+```python
+batch_update_listings(
+    package_name="com.example.myapp",
+    updates=[
+        {"language": "en-US", "title": "My App", "short_description": "A better app"},
+        {"language": "es-ES", "title": "Mi App"},
+    ],
+)
+```
+
+Set `commit=True` only after reviewing a successful dry-run result.
 
 ---
 
