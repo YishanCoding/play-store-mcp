@@ -59,7 +59,7 @@ Validate store listing text lengths before updating.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `title` | string | No | App title (max 50 characters) |
+| `title` | string | No | App title (max 30 characters) |
 | `short_description` | string | No | Short description (max 80 characters) |
 | `full_description` | string | No | Full description (max 4,000 characters) |
 

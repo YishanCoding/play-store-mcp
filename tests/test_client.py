@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 if TYPE_CHECKING:
-    from unittest.mock import MagicMock
+    pass
 
 from play_store_mcp.client import PlayStoreClient, PlayStoreClientError
 
@@ -560,6 +560,92 @@ class TestStoreListings:
         assert any(listing.language == "en-US" for listing in listings)
         assert any(listing.language == "es-ES" for listing in listings)
 
+    def test_batch_update_listings_dry_run_does_not_create_edit(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test dry-run validates multiple listings without creating an edit."""
+        result = client.batch_update_listings(
+            package_name="com.example.app",
+            updates=[
+                {"language": "en-US", "title": "New Title"},
+                {"language": "es-ES", "short_description": "Nueva descripcion"},
+            ],
+        )
+
+        assert result.success is True
+        assert result.commit is False
+        assert result.validated_languages == ["en-US", "es-ES"]
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_batch_update_listings_validation_error_blocks_edit(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test invalid batch input fails before any edit is created."""
+        result = client.batch_update_listings(
+            package_name="com.example.app",
+            updates=[{"language": "en-US", "title": "A" * 31}],
+            commit=True,
+        )
+
+        assert result.success is False
+        assert result.commit is False
+        assert result.errors[0]["field"] == "title"
+        _mock_service.edits.return_value.insert.assert_not_called()
+
+    def test_batch_update_listings_commit_multiple_languages(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test committing multiple locale listing updates in one edit."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.listings.return_value.get.return_value.execute.side_effect = [
+            {
+                "title": "Old Title",
+                "fullDescription": "Old full",
+                "shortDescription": "Old short",
+                "video": "https://youtu.be/old",
+            },
+            {
+                "title": "Titulo viejo",
+                "fullDescription": "Descripcion vieja",
+                "shortDescription": "Corta vieja",
+            },
+        ]
+        mock_edits.listings.return_value.update.return_value.execute.return_value = {}
+        mock_edits.commit.return_value.execute.return_value = {}
+
+        result = client.batch_update_listings(
+            package_name="com.example.app",
+            updates=[
+                {"language": "en-US", "title": "New Title"},
+                {"language": "es-ES", "short_description": "Nueva corta"},
+            ],
+            commit=True,
+        )
+
+        assert result.success is True
+        assert result.commit is True
+        assert result.edit_id == "edit-123"
+        assert result.updated_languages == ["en-US", "es-ES"]
+        assert mock_edits.listings.return_value.update.call_count == 2
+        first_update = mock_edits.listings.return_value.update.call_args_list[0].kwargs
+        assert first_update["language"] == "en-US"
+        assert first_update["body"]["title"] == "New Title"
+        assert first_update["body"]["fullDescription"] == "Old full"
+        assert first_update["body"]["shortDescription"] == "Old short"
+        assert first_update["body"]["video"] == "https://youtu.be/old"
+        second_update = mock_edits.listings.return_value.update.call_args_list[1].kwargs
+        assert second_update["language"] == "es-ES"
+        assert second_update["body"]["title"] == "Titulo viejo"
+        assert second_update["body"]["shortDescription"] == "Nueva corta"
+        mock_edits.commit.assert_called_once_with(packageName="com.example.app", editId="edit-123")
+
 
 class TestTesters:
     """Test testers management methods."""
@@ -881,9 +967,17 @@ class TestValidation:
         client: PlayStoreClient,
     ) -> None:
         """Test validating title that's too long."""
-        errors = client.validate_listing_text(title="A" * 51)
+        errors = client.validate_listing_text(title="A" * 31)
         assert len(errors) > 0
         assert any("title" in e.field.lower() for e in errors)
+
+    def test_validate_listing_text_title_at_limit(
+        self,
+        client: PlayStoreClient,
+    ) -> None:
+        """Test validating title at the 30 character limit."""
+        errors = client.validate_listing_text(title="A" * 30)
+        assert len(errors) == 0
 
 
 class TestBatchOperations:
@@ -918,200 +1012,142 @@ class TestBatchOperations:
         assert len(result.results) == 2
 
 
-def _mk_subprocess_result(stdout: str, returncode: int = 0, stderr: str = "") -> Any:
-    """Create a mock subprocess.run result."""
-    from types import SimpleNamespace
-    return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+class TestBrowserStats:
+    """Tests for browser-based stats methods (get_search_terms, get_acquisition_funnel)."""
 
+    @pytest.fixture()
+    def bare_client(self) -> PlayStoreClient:
+        return PlayStoreClient(credentials_path="/nonexistent/path.json")
 
-class TestSearchTerms:
-    """Tests for get_search_terms (browser-based via OpenCLI)."""
-
-    def test_get_search_terms_parses_response(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        sample = {
+    def test_get_search_terms_success(self, bare_client: PlayStoreClient) -> None:
+        # Response format from getAcquisitionDetailsTableData with dimension type 2 (search term).
+        # "1" = outer wrapper; "3" = list of rows;
+        # each row: "1"={"1":term_id,"2":display}, "2"={"1":visitors}, "3"={"1":installs}
+        response = {
             "1": {
                 "1": 2,
-                "2": {"2": {"1": "100"}, "3": {"1": "10"}, "4": {"1": 0.1}},
                 "3": [
-                    {"1": {"1": "alpha", "2": "alpha"}, "2": {"1": "60"}, "3": {"1": "6"}, "4": {"1": 0.1}},
-                    {"1": {"1": "beta", "2": "beta term"}, "2": {"1": "40"}, "3": {"1": "4"}, "4": {"1": 0.1}},
+                    {"1": {"1": "puzzle game", "2": "puzzle game"}, "2": {"1": "120"}, "3": {"1": "42"}},
+                    {"1": {"1": "brain teaser", "2": "brain teaser"}, "2": {"1": "60"}, "3": {"1": "15"}},
+                    {"1": {"1": "word game", "2": "word game"}, "2": {"1": "95"}, "3": {"1": "28"}},
                 ],
             }
         }
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result(json.dumps(sample)),
-        ) as mock_run:
-            result = client.get_search_terms(
-                package_name="com.example.app",
-                developer_id="123",
-                app_id="456",
-                start_date="2026-04-01",
-                end_date="2026-04-28",
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(response), stderr="")
+            result = bare_client.get_search_terms(
+                package_name="com.vast.jujubit",
+                developer_id="6287361731679611511",
+                app_id="4973755093875388037",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
             )
 
-        assert mock_run.call_count == 1
-        cmd = mock_run.call_args[0][0]
-        assert cmd[1:3] == ["browser", "eval"]
-        assert "getAcquisitionDetailsTableData" in cmd[3]
-        assert "'1':2" in cmd[3]  # STORE_QUERY dimension code
+        assert result.package_name == "com.vast.jujubit"
+        assert result.start_date == "2024-01-01"
+        assert result.end_date == "2024-01-31"
+        assert len(result.terms) == 3
+        # Should be sorted by installs descending
+        assert result.terms[0].term == "puzzle game"
+        assert result.terms[0].installs == 42
+        assert result.terms[0].store_listing_visitors == 120
+        assert result.terms[1].term == "word game"
+        assert result.terms[1].installs == 28
+        assert result.terms[2].term == "brain teaser"
+        assert result.terms[2].installs == 15
 
-        assert result.package_name == "com.example.app"
-        assert result.start_date == "2026-04-01"
-        assert result.end_date == "2026-04-28"
-        assert len(result.terms) == 2
-        # Sorted by installs descending; here both equal so order preserved
-        assert result.terms[0].term == "alpha"
-        assert result.terms[0].installs == 6
-        assert result.terms[0].store_listing_visitors == 60
-        assert result.terms[1].term == "beta term"
-
-    def test_get_search_terms_empty(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result(json.dumps({"1": {"1": 2, "2": {}}})),
-        ):
-            result = client.get_search_terms(
-                package_name="com.example.app",
+    def test_get_search_terms_empty(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({}), stderr="")
+            result = bare_client.get_search_terms(
+                package_name="com.vast.jujubit",
                 developer_id="123",
                 app_id="456",
-                start_date="2026-04-01",
-                end_date="2026-04-28",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
             )
         assert result.terms == []
 
-    def test_get_search_terms_invalid_json_raises(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result("not json"),
-        ):
-            with pytest.raises(PlayStoreClientError, match="Invalid JSON"):
-                client.get_search_terms(
-                    package_name="com.example.app",
+    def test_get_search_terms_browser_error(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"error": "Not logged into Play Console"}),
+                stderr="",
+            )
+            with pytest.raises(PlayStoreClientError, match="Not logged into Play Console"):
+                bare_client.get_search_terms(
+                    package_name="com.vast.jujubit",
                     developer_id="123",
                     app_id="456",
-                    start_date="2026-04-01",
-                    end_date="2026-04-28",
+                    start_date="2024-01-01",
+                    end_date="2024-01-31",
                 )
 
-    def test_get_search_terms_subprocess_failure_raises(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result("", returncode=1, stderr="opencli not running"),
-        ):
-            with pytest.raises(PlayStoreClientError, match="opencli browser eval failed"):
-                client.get_search_terms(
-                    package_name="com.example.app",
-                    developer_id="123",
-                    app_id="456",
-                    start_date="2026-04-01",
-                    end_date="2026-04-28",
-                )
-
-    def test_get_search_terms_sorted_by_installs(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        sample = {
-            "1": {
-                "1": 2,
-                "2": {},
-                "3": [
-                    {"1": {"1": "low", "2": "low"}, "2": {"1": "10"}, "3": {"1": "1"}, "4": {}},
-                    {"1": {"1": "high", "2": "high"}, "2": {"1": "100"}, "3": {"1": "20"}, "4": {}},
-                    {"1": {"1": "mid", "2": "mid"}, "2": {"1": "50"}, "3": {"1": "5"}, "4": {}},
-                ],
-            }
+    def test_get_acquisition_funnel_success(self, bare_client: PlayStoreClient) -> None:
+        # Response format from getAcquisitionSummary (live reverse-engineered):
+        # "1" = traffic source array; "2" = conversion summary (visitors, installers, rate)
+        response = {
+            "1": [
+                {"1": {"1": "@OVERALL@"}, "2": {"1": "22"}},
+                {"1": {"1": "STORE_SEARCH", "2": "Google Play search"}, "2": {"1": "9"}},
+                {"1": {"1": "STORE_BROWSE", "2": "Google Play explore"}, "2": {"1": "8"}},
+                {"1": {"1": "DEEPLINK", "2": "Ads and referrals"}, "2": {"1": "5"}},
+            ],
+            "2": {
+                "1": {"1": "177"},
+                "2": {"1": "22"},
+                "3": {"1": 0.12429378531073447},
+            },
         }
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result(json.dumps(sample)),
-        ):
-            result = client.get_search_terms(
-                package_name="com.example.app",
-                developer_id="123",
-                app_id="456",
-                start_date="2026-04-01",
-                end_date="2026-04-28",
-            )
-        assert [t.term for t in result.terms] == ["high", "mid", "low"]
-        assert [t.installs for t in result.terms] == [20, 5, 1]
-
-
-class TestAcquisitionFunnel:
-    """Tests for get_acquisition_funnel (browser-based via OpenCLI)."""
-
-    def test_get_acquisition_funnel_parses_response(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        sample = {
-            "1": {
-                "1": 6,
-                "2": {"2": {"1": "177"}, "3": {"1": "22"}, "4": {"1": 0.1242937853107345}},
-                "3": [],
-            }
-        }
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result(json.dumps(sample)),
-        ) as mock_run:
-            result = client.get_acquisition_funnel(
-                package_name="com.example.app",
-                developer_id="123",
-                app_id="456",
-                start_date="2026-03-27",
-                end_date="2026-04-23",
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(response), stderr="")
+            result = bare_client.get_acquisition_funnel(
+                package_name="com.vast.jujubit",
+                developer_id="6287361731679611511",
+                app_id="4973755093875388037",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
             )
 
-        assert mock_run.call_count == 1
-        cmd = mock_run.call_args[0][0]
-        assert "getAcquisitionDetailsTableData" in cmd[3]
-        assert "'1':6" in cmd[3]  # COUNTRY dimension code
-
-        assert result.package_name == "com.example.app"
-        assert len(result.stages) == 2
+        assert result.package_name == "com.vast.jujubit"
+        # 2 funnel stages + 3 traffic source breakdown stages
+        assert len(result.stages) == 5
         assert result.stages[0].stage == "store_listing_visitors"
         assert result.stages[0].value == 177
         assert result.stages[0].conversion_rate == 0.0
         assert result.stages[1].stage == "installers"
         assert result.stages[1].value == 22
-        assert abs(result.stages[1].conversion_rate - 0.1242937853107345) < 1e-9
+        assert result.stages[1].conversion_rate == round(0.12429378531073447, 4)
+        # Traffic source breakdown
+        assert result.stages[2].stage == "src:search"
+        assert result.stages[2].value == 9
 
-    def test_get_acquisition_funnel_empty_totals(
-        self,
-        client: PlayStoreClient,
-        _mock_service: MagicMock,
-    ) -> None:
-        with patch(
-            "play_store_mcp.client.subprocess.run",
-            return_value=_mk_subprocess_result(json.dumps({"1": {"1": 6, "2": {}}})),
-        ):
-            result = client.get_acquisition_funnel(
-                package_name="com.example.app",
+    def test_get_acquisition_funnel_empty(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({}), stderr="")
+            result = bare_client.get_acquisition_funnel(
+                package_name="com.vast.jujubit",
                 developer_id="123",
                 app_id="456",
-                start_date="2026-03-27",
-                end_date="2026-04-23",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
             )
+        assert result.stages[0].stage == "store_listing_visitors"
         assert result.stages[0].value == 0
-        assert result.stages[1].value == 0
-        assert result.stages[1].conversion_rate == 0.0
+
+    def test_get_acquisition_funnel_browser_error(self, bare_client: PlayStoreClient) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"error": "Not logged into Play Console"}),
+                stderr="",
+            )
+            with pytest.raises(PlayStoreClientError, match="Not logged into Play Console"):
+                bare_client.get_acquisition_funnel(
+                    package_name="com.vast.jujubit",
+                    developer_id="123",
+                    app_id="456",
+                    start_date="2024-01-01",
+                    end_date="2024-01-31",
+                )

@@ -49,6 +49,7 @@ class TestServerTools:
             "get_in_app_product",
             "get_listing",
             "update_listing",
+            "batch_update_listings",
             "list_all_listings",
             "get_testers",
             "update_testers",

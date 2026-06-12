@@ -196,6 +196,7 @@ Add to your `claude_desktop_config.json`:
 | --- | --- |
 | `get_listing` | Get store listing for a specific language |
 | `update_listing` | Update store listing (title, descriptions, video) |
+| `batch_update_listings` | Dry-run or commit listing updates across languages |
 | `list_all_listings` | List all store listings for all languages |
 
 ### Review Tools
@@ -324,6 +325,15 @@ update_listing(
 
 # Get all listings
 listings = list_all_listings(package_name="com.example.myapp")
+
+# Dry-run batch listing updates across languages
+batch_result = batch_update_listings(
+    package_name="com.example.myapp",
+    updates=[
+        {"language": "en-US", "title": "My Awesome App"},
+        {"language": "es-ES", "short_description": "Una app de productividad"},
+    ],
+)
 ```
 
 ### Manage Testers

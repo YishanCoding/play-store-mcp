@@ -595,7 +595,7 @@ def update_listing(
     Args:
         package_name: App package name
         language: Language code (e.g., en-US, es-ES, fr-FR)
-        title: App title (max 50 characters, optional)
+        title: App title (max 30 characters, optional)
         full_description: Full description (max 4000 characters, optional)
         short_description: Short description (max 80 characters, optional)
         video: YouTube video URL (optional)
@@ -612,6 +612,37 @@ def update_listing(
         full_description=full_description,
         short_description=short_description,
         video=video,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def batch_update_listings(
+    package_name: str,
+    updates: list[dict[str, Any]],
+    commit: bool = False,
+) -> dict[str, Any]:
+    """Validate or update store listings for multiple languages.
+
+    This tool is dry-run by default: it validates all requested listing text
+    locally and does not create a Google Play edit unless commit is explicitly
+    set to true.
+
+    Args:
+        package_name: App package name
+        updates: Items with language plus optional title, short_description,
+            full_description, and video fields
+        commit: If true, create one edit, update all locales, and commit it
+
+    Returns:
+        Batch validation/update result
+    """
+    client = get_client_from_context()
+
+    result = client.batch_update_listings(
+        package_name=package_name,
+        updates=updates,
+        commit=commit,
     )
     return result.model_dump()
 
@@ -862,7 +893,7 @@ def validate_listing_text(
     """Validate store listing text lengths before updating.
 
     Args:
-        title: App title (max 50 characters)
+        title: App title (max 30 characters)
         short_description: Short description (max 80 characters)
         full_description: Full description (max 4000 characters)
 
@@ -1835,14 +1866,15 @@ def get_search_terms(
     start_date: str,
     end_date: str,
 ) -> dict[str, Any]:
-    """Get search-term acquisition stats from Play Console via browser session (OpenCLI).
+    """Get top search terms driving installs from Play Console via browser session (OpenCLI).
 
-    Returns the list of search terms users typed in Play Store search before
-    acquiring the app, with installs and store-listing visitor counts. Terms
-    falling below the privacy threshold are aggregated as "Other".
+    Returns the search terms that brought users to the store listing, sorted by installs.
 
     REQUIREMENT: OpenCLI must be installed and the automation browser must be
     logged into Play Console (play.google.com/console).
+
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/statistics
 
     Args:
         package_name: App package name (e.g. com.example.app)
@@ -1852,7 +1884,7 @@ def get_search_terms(
         end_date: End date YYYY-MM-DD
 
     Returns:
-        package_name, start_date, end_date, terms (sorted by installs desc)
+        terms: List of search terms with installs and store_listing_visitors, sorted by installs desc
     """
     client = get_client_from_context()
     result = client.get_search_terms(
@@ -1873,24 +1905,25 @@ def get_acquisition_funnel(
     start_date: str,
     end_date: str,
 ) -> dict[str, Any]:
-    """Get the acquisition funnel summary from Play Console via browser session.
+    """Get user acquisition funnel from Play Console via browser session (OpenCLI).
 
-    Returns funnel stages (store listing visitors -> installers) with the
-    conversion rate between them, taken from the Play Console acquisition
-    details RPC.
+    Returns the conversion funnel: impressions → store listing visitors → installers → buyers.
 
     REQUIREMENT: OpenCLI must be installed and the automation browser must be
     logged into Play Console (play.google.com/console).
 
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/grow-overview
+
     Args:
-        package_name: App package name
+        package_name: App package name (e.g. com.example.app)
         developer_id: Numeric developer account ID from Play Console URL
         app_id: Numeric app ID from Play Console URL
         start_date: Start date YYYY-MM-DD
         end_date: End date YYYY-MM-DD
 
     Returns:
-        package_name, start_date, end_date, stages (ordered list)
+        stages: Funnel stages with value and conversion_rate relative to previous stage
     """
     client = get_client_from_context()
     result = client.get_acquisition_funnel(
@@ -1899,6 +1932,456 @@ def get_acquisition_funnel(
         app_id=app_id,
         start_date=start_date,
         end_date=end_date,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# In-App Products CRUD Tools
+# =============================================================================
+
+
+@mcp.tool()
+def create_in_app_product(
+    package_name: str,
+    sku: str,
+    product_type: str,
+    default_language: str,
+    title: str,
+    description: str,
+    default_price_amount: str,
+    default_price_currency: str,
+) -> dict[str, Any]:
+    """Create a new in-app product (one-time purchase).
+
+    Args:
+        package_name: App package name
+        sku: Unique product SKU identifier (e.g. "coins_100")
+        product_type: "managedProduct" (one-time) or "subscription" (legacy)
+        default_language: Default locale code (e.g. "en-US")
+        title: Product title shown to users
+        description: Product description shown to users
+        default_price_amount: Price as decimal string (e.g. "0.99")
+        default_price_currency: ISO 4217 currency code (e.g. "USD")
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.create_in_app_product(
+        package_name=package_name,
+        sku=sku,
+        product_type=product_type,
+        default_language=default_language,
+        title=title,
+        description=description,
+        default_price_amount=default_price_amount,
+        default_price_currency=default_price_currency,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_in_app_product(
+    package_name: str,
+    sku: str,
+    title: str | None = None,
+    description: str | None = None,
+    default_price_amount: str | None = None,
+    default_price_currency: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing in-app product.
+
+    Args:
+        package_name: App package name
+        sku: Product SKU identifier
+        title: New product title (optional)
+        description: New product description (optional)
+        default_price_amount: New price as decimal string (optional, e.g. "1.99")
+        default_price_currency: Currency code if changing price (optional)
+        status: "active" or "inactive" (optional)
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.update_in_app_product(
+        package_name=package_name,
+        sku=sku,
+        title=title,
+        description=description,
+        default_price_amount=default_price_amount,
+        default_price_currency=default_price_currency,
+        status=status,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_in_app_product(
+    package_name: str,
+    sku: str,
+) -> dict[str, Any]:
+    """Delete an in-app product permanently.
+
+    Args:
+        package_name: App package name
+        sku: Product SKU to delete
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    return client.delete_in_app_product(package_name=package_name, sku=sku)
+
+
+# =============================================================================
+# Subscriptions CRUD Tools
+# =============================================================================
+
+
+@mcp.tool()
+def get_subscription(
+    package_name: str,
+    product_id: str,
+) -> dict[str, Any]:
+    """Get details of a subscription product from the Monetization API.
+
+    Args:
+        package_name: App package name
+        product_id: Subscription product ID
+
+    Returns:
+        Subscription details including state, listings, and base plans
+    """
+    client = get_client_from_context()
+    result = client.get_subscription(package_name=package_name, product_id=product_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def create_subscription(
+    package_name: str,
+    product_id: str,
+    default_language: str,
+    title: str,
+    description: str,
+) -> dict[str, Any]:
+    """Create a new subscription product via the Monetization API.
+
+    Args:
+        package_name: App package name
+        product_id: Unique subscription product ID (e.g. "premium_monthly")
+        default_language: Default locale code (e.g. "en-US")
+        title: Subscription title shown to users
+        description: Subscription description shown to users
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.create_subscription(
+        package_name=package_name,
+        product_id=product_id,
+        default_language=default_language,
+        title=title,
+        description=description,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_subscription(
+    package_name: str,
+    product_id: str,
+    title: str | None = None,
+    description: str | None = None,
+    default_language: str = "en-US",
+) -> dict[str, Any]:
+    """Update an existing subscription product's listings.
+
+    Args:
+        package_name: App package name
+        product_id: Subscription product ID
+        title: New title (optional)
+        description: New description (optional)
+        default_language: Locale to update (default "en-US")
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.update_subscription(
+        package_name=package_name,
+        product_id=product_id,
+        title=title,
+        description=description,
+        default_language=default_language,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_subscription(
+    package_name: str,
+    product_id: str,
+) -> dict[str, Any]:
+    """Delete a subscription product permanently.
+
+    Args:
+        package_name: App package name
+        product_id: Subscription product ID to delete
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_subscription(package_name=package_name, product_id=product_id)
+    return result.model_dump()
+
+
+@mcp.tool()
+def activate_base_plan(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+) -> dict[str, Any]:
+    """Activate a base plan for a subscription product.
+
+    Args:
+        package_name: App package name
+        product_id: Subscription product ID
+        base_plan_id: Base plan ID to activate
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.activate_base_plan(
+        package_name=package_name, product_id=product_id, base_plan_id=base_plan_id
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def deactivate_base_plan(
+    package_name: str,
+    product_id: str,
+    base_plan_id: str,
+) -> dict[str, Any]:
+    """Deactivate a base plan for a subscription product.
+
+    Args:
+        package_name: App package name
+        product_id: Subscription product ID
+        base_plan_id: Base plan ID to deactivate
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.deactivate_base_plan(
+        package_name=package_name, product_id=product_id, base_plan_id=base_plan_id
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Country Availability Update Tool
+# =============================================================================
+
+
+@mcp.tool()
+def update_country_availability(
+    package_name: str,
+    track: str,
+    countries: list[str],
+    rest_of_world: bool = False,
+) -> dict[str, Any]:
+    """Set the countries where a release track is available.
+
+    Args:
+        package_name: App package name
+        track: Track name (internal, alpha, beta, production)
+        countries: List of ISO 3166-1 alpha-2 country codes (e.g. ["US", "GB", "JP"])
+        rest_of_world: If True, also available in all countries not explicitly listed
+
+    Returns:
+        Update result with the countries set and success status
+    """
+    client = get_client_from_context()
+    result = client.update_country_availability(
+        package_name=package_name,
+        track=track,
+        countries=countries,
+        rest_of_world=rest_of_world,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# User & Grant Update Tools
+# =============================================================================
+
+
+@mcp.tool()
+def update_user(
+    developer_id: str,
+    email: str,
+    access_state: str,
+) -> dict[str, Any]:
+    """Update a user's account-level access state.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL)
+        email: User's Google account email address
+        access_state: New access state: accessGranted, accessExpired, or accessRevoked
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.update_user(
+        developer_id=developer_id, email=email, access_state=access_state
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_grant(
+    developer_id: str,
+    email: str,
+    package_name: str,
+    app_level_permissions: list[str],
+) -> dict[str, Any]:
+    """Update a user's app-level permissions on a specific app.
+
+    Args:
+        developer_id: Developer account ID (numeric ID from Play Console URL)
+        email: User's Google account email address
+        package_name: App package name
+        app_level_permissions: New permissions list. Valid values:
+                               canAccessStats, canManageProductionRelease,
+                               canManageTestTracks, canManageStorePresence,
+                               canReplyToReviews
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.update_grant(
+        developer_id=developer_id,
+        email=email,
+        package_name=package_name,
+        app_level_permissions=app_level_permissions,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Subscription Defer Tool
+# =============================================================================
+
+
+@mcp.tool()
+def defer_subscription(
+    package_name: str,
+    subscription_id: str,
+    purchase_token: str,
+    expected_expiry_time_millis: str,
+    desired_expiry_time_millis: str,
+) -> dict[str, Any]:
+    """Defer a subscriber's renewal date (customer service use case).
+
+    Args:
+        package_name: App package name
+        subscription_id: Subscription product ID
+        purchase_token: The purchase token from the client app
+        expected_expiry_time_millis: Current expiry time in milliseconds (Unix epoch)
+        desired_expiry_time_millis: New desired expiry time in milliseconds (Unix epoch)
+
+    Returns:
+        Result with the new expiry time in milliseconds
+    """
+    client = get_client_from_context()
+    result = client.defer_subscription(
+        package_name=package_name,
+        subscription_id=subscription_id,
+        token=purchase_token,
+        expected_expiry_time_millis=expected_expiry_time_millis,
+        desired_expiry_time_millis=desired_expiry_time_millis,
+    )
+    return result.model_dump()
+
+
+# =============================================================================
+# Store Listing Delete Tools
+# =============================================================================
+
+
+@mcp.tool()
+def delete_listing(
+    package_name: str,
+    language: str,
+) -> dict[str, Any]:
+    """Delete the store listing for a specific language locale.
+
+    Args:
+        package_name: App package name
+        language: Language code to delete (e.g. "fr-FR", "de-DE")
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_listing(package_name=package_name, language=language)
+    return result.model_dump()
+
+
+@mcp.tool()
+def delete_all_listings(
+    package_name: str,
+) -> dict[str, Any]:
+    """Delete all store listings for an app. Use with caution.
+
+    Args:
+        package_name: App package name
+
+    Returns:
+        Operation result with success status
+    """
+    client = get_client_from_context()
+    result = client.delete_all_listings(package_name=package_name)
+    return result.model_dump()
+
+
+# =============================================================================
+# Region Price Conversion Tool
+# =============================================================================
+
+
+@mcp.tool()
+def convert_region_prices(
+    package_name: str,
+    price_amount: str,
+    currency_code: str,
+) -> dict[str, Any]:
+    """Convert a base price to all regional equivalents using Google's exchange rates.
+
+    Args:
+        package_name: App package name
+        price_amount: Base price as decimal string (e.g. "9.99")
+        currency_code: ISO 4217 base currency code (e.g. "USD")
+
+    Returns:
+        List of converted prices per region with local currency and amount
+    """
+    client = get_client_from_context()
+    result = client.convert_region_prices(
+        package_name=package_name,
+        price_amount=price_amount,
+        currency_code=currency_code,
     )
     return result.model_dump()
 

@@ -280,7 +280,7 @@ class TestValidation:
         print("✓ Valid listing text passed validation")
 
         # Invalid text (too long)
-        errors = real_client.validate_listing_text(title="A" * 51)
+        errors = real_client.validate_listing_text(title="A" * 31)
         assert len(errors) > 0
         print(f"✓ Invalid listing text caught {len(errors)} errors")
 

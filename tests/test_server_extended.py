@@ -15,6 +15,7 @@ from play_store_mcp.models import (
     ExpansionFile,
     InAppProduct,
     Listing,
+    ListingBatchUpdateResult,
     ListingUpdateResult,
     Order,
     Release,
@@ -31,6 +32,7 @@ from play_store_mcp.models import (
 )
 from play_store_mcp.server import (
     batch_deploy,
+    batch_update_listings,
     deploy_app,
     deploy_app_multilang,
     get_app_details,
@@ -475,6 +477,28 @@ class TestListingsTools:
         result = update_listing("com.example.app", "en-US", title="New Title")
 
         assert result["success"] is True
+
+    def test_batch_update_listings(self, mock_client: MagicMock) -> None:
+        """Test batch_update_listings tool."""
+        mock_client.batch_update_listings.return_value = ListingBatchUpdateResult(
+            success=True,
+            package_name="com.example.app",
+            commit=False,
+            validated_languages=["en-US", "es-ES"],
+            message="Dry-run passed",
+        )
+
+        result = batch_update_listings(
+            "com.example.app",
+            [
+                {"language": "en-US", "title": "New Title"},
+                {"language": "es-ES", "short_description": "Nueva corta"},
+            ],
+        )
+
+        assert result["success"] is True
+        assert result["commit"] is False
+        assert result["validated_languages"] == ["en-US", "es-ES"]
 
     def test_list_all_listings(self, mock_client: MagicMock) -> None:
         """Test list_all_listings tool."""

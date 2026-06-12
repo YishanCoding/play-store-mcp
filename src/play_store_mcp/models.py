@@ -200,6 +200,25 @@ class ListingUpdateResult(BaseModel):
     error: str | None = Field(None, description="Error details if failed")
 
 
+class ListingBatchUpdateResult(BaseModel):
+    """Result of validating or updating multiple store listings."""
+
+    success: bool = Field(..., description="Whether validation/update succeeded")
+    package_name: str = Field(..., description="App package name")
+    commit: bool = Field(..., description="Whether changes were committed")
+    edit_id: str | None = Field(None, description="Edit ID used for committed updates")
+    validated_languages: list[str] = Field(
+        default_factory=list, description="Languages that passed validation"
+    )
+    updated_languages: list[str] = Field(
+        default_factory=list, description="Languages updated when commit is true"
+    )
+    errors: list[dict[str, Any]] = Field(
+        default_factory=list, description="Validation or update errors by language"
+    )
+    message: str = Field(..., description="Status message")
+
+
 class TesterInfo(BaseModel):
     """Information about testers for a track."""
 
@@ -502,34 +521,130 @@ class ConsoleInstallStats(BaseModel):
 
 
 class SearchTermResult(BaseModel):
-    """A single search term row with acquisition stats."""
+    """A single search term with its install and visitor stats."""
 
-    term: str = Field(..., description="Search term (or display name; may be 'Other' for thresholded)")
-    installs: int = Field(0, description="Acquisitions (installs) attributable to this term")
-    store_listing_visitors: int = Field(0, description="Store listing visitors who searched this term")
+    term: str = Field(..., description="Search term string")
+    installs: int = Field(0, description="Number of installs attributed to this search term")
+    store_listing_visitors: int = Field(0, description="Number of store listing visitors from this term")
 
 
 class SearchTermsStats(BaseModel):
-    """Search term acquisition stats from Play Console (browser-based)."""
+    """Search terms statistics from Play Console."""
 
     package_name: str = Field(..., description="App package name")
     start_date: str = Field(..., description="Start date YYYY-MM-DD")
     end_date: str = Field(..., description="End date YYYY-MM-DD")
-    terms: list[SearchTermResult] = Field(default_factory=list, description="Terms ordered by installs descending")
+    terms: list[SearchTermResult] = Field(default_factory=list, description="Search terms sorted by installs descending")
 
 
 class AcquisitionFunnelStage(BaseModel):
-    """One stage of the acquisition funnel."""
+    """A single stage in the user acquisition funnel."""
 
-    stage: str = Field(..., description="Stage name: store_listing_visitors, installers, buyers, etc.")
+    stage: str = Field(..., description="Stage name: impressions, store_listing_visitors, installers, buyers")
     value: int = Field(0, description="Count for this stage")
-    conversion_rate: float = Field(0.0, description="Conversion rate from the previous stage (0.0 for first)")
+    conversion_rate: float = Field(0.0, description="Conversion rate relative to previous stage (0.0-1.0)")
 
 
 class AcquisitionFunnelResult(BaseModel):
-    """Acquisition funnel summary from Play Console (browser-based)."""
+    """User acquisition funnel from Play Console."""
 
     package_name: str = Field(..., description="App package name")
     start_date: str = Field(..., description="Start date YYYY-MM-DD")
     end_date: str = Field(..., description="End date YYYY-MM-DD")
+
+
+# ---------------------------------------------------------------------------
+# New models for missing API coverage
+# ---------------------------------------------------------------------------
+
+
+class InAppProductUpsertResult(BaseModel):
+    """Result of creating or updating an in-app product."""
+
+    success: bool
+    package_name: str
+    sku: str
+    message: str
+    error: str | None = None
+
+
+class SubscriptionDetails(BaseModel):
+    """Full subscription product details from the Monetization API."""
+
+    product_id: str
+    package_name: str
+    state: str | None = None
+    listings: dict | None = None
+    base_plans: list[dict] | None = None
+
+
+class SubscriptionUpsertResult(BaseModel):
+    """Result of creating or updating a subscription product."""
+
+    success: bool
+    package_name: str
+    product_id: str
+    message: str
+    error: str | None = None
+
+
+class BasePlanActionResult(BaseModel):
+    """Result of activating or deactivating a base plan."""
+
+    success: bool
+    package_name: str
+    product_id: str
+    base_plan_id: str
+    action: str
+    message: str
+    error: str | None = None
+
+
+class CountryAvailabilityUpdateResult(BaseModel):
+    """Result of updating country availability for a track."""
+
+    success: bool
+    package_name: str
+    track: str
+    countries_set: list[str]
+    rest_of_world: bool
+    message: str
+    error: str | None = None
+
+
+class SubscriptionDeferResult(BaseModel):
+    """Result of deferring a subscription renewal."""
+
+    success: bool
+    package_name: str
+    subscription_id: str
+    new_expiry_time_millis: str | None = None
+    message: str
+    error: str | None = None
+
+
+class ListingDeleteResult(BaseModel):
+    """Result of deleting a store listing."""
+
+    success: bool
+    package_name: str
+    language: str | None = None
+    message: str
+    error: str | None = None
+
+
+class RegionPrice(BaseModel):
+    """Converted price for a specific region."""
+
+    region_code: str
+    price_micros: str
+    currency_code: str
+
+
+class ConvertRegionPricesResult(BaseModel):
+    """Result of converting a price to all regional equivalents."""
+
+    success: bool
+    converted_prices: list[RegionPrice]
+    error: str | None = None
     stages: list[AcquisitionFunnelStage] = Field(default_factory=list, description="Funnel stages in order")
