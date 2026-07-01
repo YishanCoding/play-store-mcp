@@ -568,6 +568,66 @@ class AcquisitionFunnelResult(BaseModel):
     )
 
 
+class CustomStoreListingSummary(BaseModel):
+    """A single Custom Store Listing (CSL), read from the Play Console UI.
+
+    CSL configuration (targeting, content, active status) has no Android
+    Publisher API surface -- this is scraped from the Console DOM via
+    OpenCLI, not the official REST API.
+    """
+
+    name: str = Field(..., description="Internal CSL name/slug shown in Console (not shown to end users)")
+    listing_id: str = Field(..., description="Numeric CSL id used in the Console edit URL")
+    edit_url: str = Field(..., description="Full Console URL to edit this CSL")
+
+
+class CustomStoreListingsResult(BaseModel):
+    """List of Custom Store Listings for an app."""
+
+    package_name: str = Field(..., description="App package name")
+    listings: list[CustomStoreListingSummary] = Field(default_factory=list)
+
+
+class StoreListingExperimentSummary(BaseModel):
+    """A single Store Listing Experiment (A/B test), decoded from Console RPC.
+
+    Experiments have no Android Publisher API surface -- this is decoded
+    from an internal protobuf response captured via OpenCLI network
+    capture. Field semantics beyond experiment_id/name/locale are inferred
+    from the response shape, not from an official schema, and may be
+    wrong or incomplete for experiment types this wasn't tested against.
+    """
+
+    experiment_id: str = Field(..., description="Numeric experiment id")
+    name: str = Field(..., description="Experiment display name (often encodes what's being tested)")
+    locale: str = Field("", description="Locale the experiment is scoped to")
+    dimension_type: int | None = Field(None, description="Inferred asset-type enum (e.g. phone screenshots); unverified against an official schema")
+    status: int | None = Field(None, description="Inferred status enum (e.g. running); unverified against an official schema")
+    start_timestamp: str | None = Field(None, description="Inferred experiment start time (ISO), decoded from an embedded protobuf Timestamp")
+    traffic_split: float | None = Field(None, description="Inferred traffic split fraction for the variant arm")
+
+
+class StoreListingExperimentsResult(BaseModel):
+    """List of Store Listing Experiments for an app."""
+
+    package_name: str = Field(..., description="App package name")
+    experiments: list[StoreListingExperimentSummary] = Field(default_factory=list)
+
+
+class ExperimentReportRaw(BaseModel):
+    """Raw decoded content of a single experiment's report page.
+
+    This does not attempt to fully name every protobuf field (no official
+    schema is available). It surfaces what's reliably extractable: any
+    embedded image URLs (control/variant creative) and readable text runs
+    (e.g. the live listing copy embedded in the report for reference).
+    """
+
+    experiment_id: str = Field(..., description="Numeric experiment id")
+    image_urls: list[str] = Field(default_factory=list, description="Creative image URLs found in the report payload, in encounter order")
+    text_strings: list[str] = Field(default_factory=list, description="Readable UTF-8 string runs found in the report payload, deduplicated, longest first")
+
+
 # ---------------------------------------------------------------------------
 # New models for missing API coverage
 # ---------------------------------------------------------------------------

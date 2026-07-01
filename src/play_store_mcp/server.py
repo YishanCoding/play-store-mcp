@@ -1964,6 +1964,126 @@ def get_acquisition_funnel(
     return result.model_dump()
 
 
+@mcp.tool()
+def get_custom_store_listings(
+    package_name: str,
+    developer_id: str,
+    app_id: str,
+) -> dict[str, Any]:
+    """List Custom Store Listings (CSL) for an app via Play Console UI scrape (OpenCLI).
+
+    CSL configuration has NO Android Publisher API surface at all -- confirmed by
+    cross-checking the full REST resource index (only v3.edits.listings exists for
+    the Main store listing; nothing for custom listings). This reads the Console UI
+    directly via OpenCLI browser automation instead.
+
+    REQUIREMENT: OpenCLI must be installed and the automation browser must be
+    logged into Play Console (play.google.com/console).
+
+    LIMITATION: returns each CSL's internal name and edit URL only. Per-CSL content
+    (title, short/full description, targeting rules) requires opening each edit URL
+    individually and was not reliably scrapable via simple selectors as of 2026-07-01
+    (Angular Material form fields) -- not yet implemented.
+
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listings
+
+    Args:
+        package_name: App package name (e.g. com.example.app)
+        developer_id: Numeric developer account ID from Play Console URL
+        app_id: Numeric app ID from Play Console URL
+
+    Returns:
+        listings: List of {name, listing_id, edit_url} for each CSL
+    """
+    client = get_client_from_context()
+    result = client.get_custom_store_listings(
+        package_name=package_name,
+        developer_id=developer_id,
+        app_id=app_id,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_store_listing_experiments(
+    package_name: str,
+    developer_id: str,
+    app_id: str,
+) -> dict[str, Any]:
+    """List Store Listing Experiments (A/B tests) for an app via Play Console RPC capture (OpenCLI).
+
+    Store Listing Experiments have NO Android Publisher API surface at all -- same
+    verification as get_custom_store_listings. This decodes an internal, undocumented
+    protobuf response captured via OpenCLI network capture. There is no public schema
+    for this response, so field semantics beyond experiment_id/name/locale are INFERRED
+    from one real reverse-engineered response, not confirmed against an official spec --
+    treat dimension_type/status/traffic_split as best-effort, verify against the Console
+    UI for anything decision-critical.
+
+    REQUIREMENT: OpenCLI must be installed and the automation browser must be
+    logged into Play Console (play.google.com/console).
+
+    Find developer_id and app_id in the Play Console URL:
+    https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listing-experiments/overview
+
+    Args:
+        package_name: App package name (e.g. com.example.app)
+        developer_id: Numeric developer account ID from Play Console URL
+        app_id: Numeric app ID from Play Console URL
+
+    Returns:
+        experiments: List of experiments with experiment_id, name, locale, and
+                     best-effort dimension_type/status/start_timestamp/traffic_split
+    """
+    client = get_client_from_context()
+    result = client.get_store_listing_experiments(
+        package_name=package_name,
+        developer_id=developer_id,
+        app_id=app_id,
+    )
+    return result.model_dump()
+
+
+@mcp.tool()
+def get_experiment_report_raw(
+    package_name: str,
+    developer_id: str,
+    app_id: str,
+    experiment_id: str,
+) -> dict[str, Any]:
+    """Fetch raw decodable content of one Store Listing Experiment's report (OpenCLI).
+
+    Companion to get_store_listing_experiments. Does not attempt to parse performance
+    metrics (installs/conversion lift per variant) -- no official schema is available
+    for that part of the response. Surfaces creative image URLs and readable text runs
+    found in the payload, which is enough to confirm what's actually being compared
+    (e.g. which screenshot set is the control vs the variant) without guessing at
+    metric field numbers.
+
+    REQUIREMENT: OpenCLI must be installed and the automation browser must be
+    logged into Play Console (play.google.com/console).
+
+    Args:
+        package_name: App package name (e.g. com.example.app)
+        developer_id: Numeric developer account ID from Play Console URL
+        app_id: Numeric app ID from Play Console URL
+        experiment_id: Numeric experiment id (from get_store_listing_experiments)
+
+    Returns:
+        image_urls: Creative image URLs found in the report payload
+        text_strings: Readable text runs found in the report payload (longest first)
+    """
+    client = get_client_from_context()
+    result = client.get_experiment_report_raw(
+        package_name=package_name,
+        developer_id=developer_id,
+        app_id=app_id,
+        experiment_id=experiment_id,
+    )
+    return result.model_dump()
+
+
 # =============================================================================
 # In-App Products CRUD Tools
 # =============================================================================
