@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
@@ -32,10 +33,13 @@ from play_store_mcp.models import (
     ConvertRegionPricesResult,
     CountryAvailability,
     CountryAvailabilityUpdateResult,
+    CustomStoreListingSummary,
+    CustomStoreListingsResult,
     DailyStatPoint,
     DeobfuscationFileResult,
     DeploymentResult,
     ExpansionFile,
+    ExperimentReportRaw,
     GeneratedApkInfo,
     GrantInfo,
     ImageInfo,
@@ -55,6 +59,8 @@ from play_store_mcp.models import (
     ReviewReplyResult,
     SearchTermResult,
     SearchTermsStats,
+    StoreListingExperimentSummary,
+    StoreListingExperimentsResult,
     SubscriptionDeferResult,
     SubscriptionDetails,
     SubscriptionProduct,
@@ -3943,11 +3949,17 @@ class PlayStoreClient:
     }
 
     _OPENCLI_BIN = os.path.expanduser("~/.npm-global/bin/opencli")
+    # "default" matches the session name already used by the deployed uv-tool
+    # install of this server -- keep this in sync so all browser-driven tools
+    # (get_search_terms, get_acquisition_funnel, this file's newer additions)
+    # share one authenticated, logged-into-Play-Console browser tab instead of
+    # each spinning up its own unauthenticated session.
+    _OPENCLI_SESSION = "default"
 
     def _run_browser_js(self, js: str, timeout: int = 20) -> str:
         """Run JS in the OpenCLI automation browser and return the result string."""
         result = subprocess.run(
-            [self._OPENCLI_BIN, "browser", "eval", js],
+            [self._OPENCLI_BIN, "browser", self._OPENCLI_SESSION, "eval", js],
             capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode != 0:
@@ -4293,4 +4305,286 @@ class PlayStoreClient:
             start_date=start_date,
             end_date=end_date,
             stages=stages,
+        )
+
+    # =========================================================================
+    # Custom Store Listings (CSL) and Store Listing Experiments (A/B tests)
+    #
+    # Neither has any Android Publisher API surface (confirmed 2026-07-01 by
+    # cross-checking the full REST resource index at
+    # https://developers.google.com/android-publisher/api-ref/rest -- only
+    # v3.edits.listings exists, nothing for custom listings or experiments).
+    # These are Play Console UI-only features, so everything below reads the
+    # Console via OpenCLI browser automation instead of the REST API.
+    #
+    # The experiments RPC response is an undocumented internal protobuf
+    # (playconsoleapps-pa.clients6.google.com). There is no public .proto
+    # schema for it, so `_decode_protobuf_generic` below is a schema-less
+    # wire-format walker: it recovers field numbers/wire types/values but not
+    # field *names* beyond what we've manually confirmed by reverse
+    # engineering one real response (see StoreListingExperimentSummary
+    # docstring for which fields are trusted vs inferred).
+    # =========================================================================
+
+    def _run_opencli_cli(self, args: list[str], timeout: int = 30) -> str:
+        """Run an arbitrary `opencli browser <session> <args...>` command and return stdout."""
+        result = subprocess.run(
+            [self._OPENCLI_BIN, "browser", self._OPENCLI_SESSION, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise PlayStoreClientError(f"opencli browser {' '.join(args)} failed: {result.stderr[:300]}")
+        return result.stdout.strip()
+
+    @staticmethod
+    def _decode_varint(buf: bytes, pos: int) -> tuple[int, int]:
+        result = 0
+        shift = 0
+        while True:
+            b = buf[pos]
+            result |= (b & 0x7F) << shift
+            pos += 1
+            if not (b & 0x80):
+                break
+            shift += 7
+        return result, pos
+
+    @classmethod
+    def _decode_protobuf_generic(cls, buf: bytes) -> dict[int, list[Any]]:
+        """Schema-less protobuf wire-format decode.
+
+        Returns {field_number: [value, ...]} (repeated fields collect all
+        occurrences in order). Length-delimited fields are returned as a
+        decoded UTF-8 string if printable, else recursively decoded as a
+        nested message if that succeeds, else raw bytes.
+        """
+        fields: dict[int, list[Any]] = {}
+        pos = 0
+        while pos < len(buf):
+            tag, pos = cls._decode_varint(buf, pos)
+            field_num = tag >> 3
+            wire_type = tag & 0x7
+            if wire_type == 0:
+                val, pos = cls._decode_varint(buf, pos)
+            elif wire_type == 2:
+                length, pos = cls._decode_varint(buf, pos)
+                chunk = buf[pos:pos + length]
+                pos += length
+                val = None
+                try:
+                    s = chunk.decode("utf-8")
+                    if s.isprintable():
+                        val = s
+                except UnicodeDecodeError:
+                    pass
+                if val is None:
+                    try:
+                        val = cls._decode_protobuf_generic(chunk) if chunk else {}
+                    except Exception:
+                        val = chunk
+            elif wire_type == 1:
+                val = buf[pos:pos + 8]
+                pos += 8
+            elif wire_type == 5:
+                val = buf[pos:pos + 4]
+                pos += 4
+            else:
+                break
+            fields.setdefault(field_num, []).append(val)
+        return fields
+
+    def get_custom_store_listings(
+        self,
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+    ) -> CustomStoreListingsResult:
+        """List Custom Store Listings (CSL) for an app via Console UI scrape.
+
+        Requires OpenCLI with an active, logged-in Play Console browser
+        session. Returns name + edit URL only -- per-CSL content (title,
+        short/full description, targeting) requires opening each edit URL
+        individually; that page's fields are Angular Material inputs that
+        weren't reliably extractable via simple CSS selectors as of
+        2026-07-01, so per-CSL content scraping is not yet implemented here.
+
+        Args:
+            package_name: App package name (display only).
+            developer_id: Numeric developer ID from Play Console URL.
+            app_id: Numeric app ID from Play Console URL.
+
+        Returns:
+            CustomStoreListingsResult with each CSL's internal name and edit URL.
+        """
+        url = f"https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listings"
+        self._run_opencli_cli(["open", url], timeout=45)
+        time.sleep(3)
+        state = self._run_opencli_cli(["state"], timeout=30)
+
+        pattern = re.compile(
+            r"Edit listing '([^']+)'[^>]*?custom-store-listings/(\d+)"
+        )
+        seen: dict[str, str] = {}
+        for name, listing_id in pattern.findall(state):
+            seen[listing_id] = name
+
+        listings = [
+            CustomStoreListingSummary(
+                name=name,
+                listing_id=listing_id,
+                edit_url=f"https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/custom-store-listings/{listing_id}",
+            )
+            for listing_id, name in seen.items()
+        ]
+        return CustomStoreListingsResult(package_name=package_name, listings=listings)
+
+    def get_store_listing_experiments(
+        self,
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+    ) -> StoreListingExperimentsResult:
+        """List Store Listing Experiments (A/B tests) for an app via Console RPC capture.
+
+        Requires OpenCLI with an active, logged-in Play Console browser
+        session. Navigates to the experiments overview page, forces a
+        reload to trigger a fresh RPC call, captures that call's response
+        via OpenCLI network capture, and decodes the embedded protobuf
+        with a schema-less wire-format walker (see module docstring above
+        for caveats -- field semantics beyond experiment_id/name/locale are
+        inferred, not from an official schema).
+
+        Args:
+            package_name: App package name (display only).
+            developer_id: Numeric developer ID from Play Console URL.
+            app_id: Numeric app ID from Play Console URL.
+
+        Returns:
+            StoreListingExperimentsResult with one entry per in-progress or
+            past experiment surfaced by the overview page.
+        """
+        url = (
+            f"https://play.google.com/console/u/0/developers/{developer_id}"
+            f"/app/{app_id}/store-listing-experiments/overview"
+        )
+        self._run_opencli_cli(["open", url], timeout=45)
+        time.sleep(3)
+        self._run_opencli_cli(["eval", "location.reload(); 'ok'"], timeout=30)
+        time.sleep(4)
+
+        detail_key = (
+            "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
+            "storelistingexperiments/overview:startupData"
+        )
+        raw = self._run_opencli_cli(["network", "--since", "60s", "--detail", detail_key], timeout=30)
+        try:
+            envelope = json.loads(raw)
+        except json.JSONDecodeError:
+            raise PlayStoreClientError(f"Invalid JSON from experiments overview capture: {raw[:200]}")
+
+        body_b64 = envelope.get("body", {}).get("2")
+        if not body_b64:
+            return StoreListingExperimentsResult(package_name=package_name, experiments=[])
+
+        decoded = self._decode_protobuf_generic(base64.b64decode(body_b64))
+        experiments: list[StoreListingExperimentSummary] = []
+        for exp_msg in decoded.get(1, []):
+            if not isinstance(exp_msg, dict):
+                continue
+            exp_id = ""
+            id_wrapper = exp_msg.get(1)
+            if id_wrapper and isinstance(id_wrapper[0], dict):
+                id_str = id_wrapper[0].get(3)
+                if id_str and isinstance(id_str[0], dict):
+                    exp_id = str(id_str[0].get(1, [""])[0])
+            name = str(exp_msg.get(2, [""])[0])
+            status = exp_msg.get(3, [None])[0]
+            dimension = exp_msg.get(4, [None])[0]
+            locale = ""
+            locale_wrapper = exp_msg.get(5)
+            if locale_wrapper and isinstance(locale_wrapper[0], dict):
+                locale = str(locale_wrapper[0].get(4, [""])[0])
+            start_iso = None
+            ts_wrapper = exp_msg.get(7)
+            if ts_wrapper and isinstance(ts_wrapper[0], dict):
+                seconds = ts_wrapper[0].get(1, [None])[0]
+                if isinstance(seconds, int):
+                    from datetime import datetime, timezone
+                    start_iso = datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+            traffic_split = None
+            split_bytes = exp_msg.get(10, [None])[0]
+            if isinstance(split_bytes, (bytes, bytearray)) and len(split_bytes) == 8:
+                import struct
+                traffic_split = struct.unpack("<d", split_bytes)[0]
+
+            experiments.append(
+                StoreListingExperimentSummary(
+                    experiment_id=exp_id,
+                    name=name,
+                    locale=locale,
+                    dimension_type=dimension if isinstance(dimension, int) else None,
+                    status=status if isinstance(status, int) else None,
+                    start_timestamp=start_iso,
+                    traffic_split=traffic_split,
+                )
+            )
+        return StoreListingExperimentsResult(package_name=package_name, experiments=experiments)
+
+    def get_experiment_report_raw(
+        self,
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+        experiment_id: str,
+    ) -> ExperimentReportRaw:
+        """Fetch the raw decodable content of one experiment's report page.
+
+        Does not attempt full field-level parsing of performance metrics
+        (no official schema available for this endpoint). Surfaces creative
+        image URLs and readable text runs found in the payload -- useful
+        for confirming what's actually being tested (e.g. control vs
+        variant screenshot sets) without guessing at metric field numbers.
+
+        Args:
+            package_name: App package name (display only).
+            developer_id: Numeric developer ID from Play Console URL.
+            app_id: Numeric app ID from Play Console URL.
+            experiment_id: Numeric experiment id (from get_store_listing_experiments).
+
+        Returns:
+            ExperimentReportRaw with image URLs and readable text strings.
+        """
+        url = (
+            f"https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}"
+            f"/store-listing-experiments/{experiment_id}/report"
+        )
+        self._run_opencli_cli(["open", url], timeout=45)
+        time.sleep(4)
+
+        detail_key = (
+            "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
+            "storelistingexperiments/report:startupData"
+        )
+        raw = self._run_opencli_cli(["network", "--since", "60s", "--detail", detail_key], timeout=30)
+        try:
+            envelope = json.loads(raw)
+        except json.JSONDecodeError:
+            raise PlayStoreClientError(f"Invalid JSON from experiment report capture: {raw[:200]}")
+
+        body_b64 = envelope.get("body", {}).get("2")
+        if not body_b64:
+            return ExperimentReportRaw(experiment_id=experiment_id, image_urls=[], text_strings=[])
+
+        raw_bytes = base64.b64decode(body_b64)
+        urls = list(dict.fromkeys(re.findall(rb"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", raw_bytes)))
+        image_urls = [u.decode("utf-8", errors="ignore") for u in urls]
+
+        text_runs = re.findall(rb"[ -~]{12,}", raw_bytes)
+        unique_texts = list(dict.fromkeys(t.decode("ascii", errors="ignore") for t in text_runs))
+        unique_texts.sort(key=len, reverse=True)
+
+        return ExperimentReportRaw(
+            experiment_id=experiment_id,
+            image_urls=image_urls,
+            text_strings=unique_texts[:50],
         )
