@@ -34,6 +34,123 @@ class TestPlayStoreClientInit:
             client._get_service()
 
 
+class TestStoreListingExperiments:
+    """Test Play Console store listing experiments capture parsing."""
+
+    DETAIL_KEY = (
+        "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
+        "storelistingexperiments/overview:startupData"
+    )
+    STARTUP_DATA_TYPE = PlayStoreClient._EXPERIMENTS_STARTUP_DATA_TYPE
+    LIVE_NONEMPTY_BODY_B64 = (
+        "CpgBCjEKCgj31Jf57cXMoFcSCgiF3e2R/vyUg0UaFQoTNTYxMjQ0ODQ1MzE4ODcwMzczNSIAEhhUUlBHLXBob25lLUExQTctdnMtMzBvZmYYASACKiUKGgoKCPfUl/ntxcygVxIKCIXd7ZH+/JSDRRoAGAEiBWVuLVVTOgsIoaSp0QYQ0KHsV0gBUQAAAAAAAOA/YAJoAXADeAUgASgB"
+    )
+
+    @patch("play_store_mcp.client.time.sleep")
+    def test_get_store_listing_experiments_decodes_nonempty_nested_body(
+        self,
+        _mock_sleep: MagicMock,
+        client: PlayStoreClient,
+    ) -> None:
+        """Regression fixture from the 2026-07-02 live JuJuBit Console response."""
+        listing = json.dumps({"entries": [{"key": self.DETAIL_KEY, "status": 200}]})
+        envelope = json.dumps(
+            {
+                "body": {
+                    "1": {
+                        "1": self.STARTUP_DATA_TYPE,
+                        "2": self.LIVE_NONEMPTY_BODY_B64,
+                    }
+                }
+            }
+        )
+
+        with patch.object(
+            client,
+            "_run_opencli_cli",
+            side_effect=["", "ok", listing, envelope],
+        ):
+            result = client.get_store_listing_experiments(
+                package_name="com.vast.jujubit",
+                developer_id="6287361731679611511",
+                app_id="4973755093875388037",
+            )
+
+        assert len(result.experiments) == 1
+        experiment = result.experiments[0]
+        assert experiment.experiment_id == "5612448453188703735"
+        assert experiment.name == "TRPG-phone-A1A7-vs-30off"
+        assert experiment.locale == "en-US"
+        assert experiment.status == 1
+        assert experiment.dimension_type == 2
+        assert experiment.start_timestamp == "2026-06-11T06:13:53+00:00"
+        assert experiment.traffic_split == 0.5
+
+    @patch("play_store_mcp.client.time.sleep")
+    def test_get_store_listing_experiments_polls_until_target_response(
+        self,
+        mock_sleep: MagicMock,
+        client: PlayStoreClient,
+    ) -> None:
+        """The RPC may arrive after the first network snapshot."""
+        empty_listing = json.dumps({"entries": []})
+        listing = json.dumps({"entries": [{"key": self.DETAIL_KEY, "status": 200}]})
+        envelope = json.dumps(
+            {
+                "body": {
+                    "1": {
+                        "1": self.STARTUP_DATA_TYPE,
+                        "2": self.LIVE_NONEMPTY_BODY_B64,
+                    }
+                }
+            }
+        )
+
+        with patch.object(
+            client,
+            "_run_opencli_cli",
+            side_effect=["", "ok", empty_listing, listing, envelope],
+        ):
+            result = client.get_store_listing_experiments(
+                package_name="com.vast.jujubit",
+                developer_id="6287361731679611511",
+                app_id="4973755093875388037",
+            )
+
+        assert len(result.experiments) == 1
+        mock_sleep.assert_called_once_with(1)
+
+    @patch("play_store_mcp.client.time.sleep")
+    def test_get_store_listing_experiments_keeps_legacy_empty_payload_path(
+        self,
+        _mock_sleep: MagicMock,
+        client: PlayStoreClient,
+    ) -> None:
+        """Legacy empty-state captures used body['2']; valid zero experiments stay empty."""
+        listing = json.dumps({"entries": [{"key": self.DETAIL_KEY, "status": 200}]})
+        envelope = json.dumps({"body": {"2": "IAEoAQ=="}})
+
+        with patch.object(
+            client,
+            "_run_opencli_cli",
+            side_effect=["", "ok", listing, envelope],
+        ):
+            result = client.get_store_listing_experiments(
+                package_name="com.example.app",
+                developer_id="123",
+                app_id="456",
+            )
+
+        assert result.experiments == []
+
+    def test_missing_experiments_payload_raises_parse_error(self) -> None:
+        """Missing payload is distinct from confirmed zero experiments."""
+        with pytest.raises(PlayStoreClientError, match="did not contain"):
+            PlayStoreClient._extract_store_listing_experiments_payload(
+                {"body": {"1": {"1": self.STARTUP_DATA_TYPE}}}
+            )
+
+
 class TestGetReleases:
     """Test get_releases method."""
 
