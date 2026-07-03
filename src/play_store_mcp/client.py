@@ -4447,6 +4447,99 @@ class PlayStoreClient:
             fields.setdefault(field_num, []).append(val)
         return fields
 
+    _EXPERIMENTS_STARTUP_DATA_TYPE = (
+        "type.googleapis.com/play.console.apps.api.storelistingexperiments."
+        "ExperimentOverviewPageStartupDataResponse"
+    )
+
+    @classmethod
+    def _extract_store_listing_experiments_payload(cls, envelope: dict[str, Any]) -> str:
+        """Find the base64 protobuf payload inside an OpenCLI network detail envelope."""
+        body = envelope.get("body")
+        if not isinstance(body, dict):
+            raise PlayStoreClientError("Experiments overview capture has no JSON body object")
+
+        def walk(value: Any) -> str | None:
+            if isinstance(value, dict):
+                if (
+                    value.get("1") == cls._EXPERIMENTS_STARTUP_DATA_TYPE
+                    and isinstance(value.get("2"), str)
+                    and value["2"]
+                ):
+                    return value["2"]
+                for child in value.values():
+                    found = walk(child)
+                    if found:
+                        return found
+            elif isinstance(value, list):
+                for child in value:
+                    found = walk(child)
+                    if found:
+                        return found
+            return None
+
+        payload = walk(body)
+        if payload:
+            return payload
+
+        legacy_payload = body.get("2")
+        if isinstance(legacy_payload, str) and legacy_payload:
+            return legacy_payload
+
+        raise PlayStoreClientError(
+            "Experiments overview capture did not contain a decodable startupData payload"
+        )
+
+    def _capture_store_listing_experiments_envelope(
+        self,
+        detail_key: str,
+        max_wait_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        """Poll OpenCLI network capture until the experiments startupData response is available."""
+        deadline = time.monotonic() + max_wait_seconds
+        last_detail_error: PlayStoreClientError | None = None
+
+        while True:
+            raw_list = self._run_opencli_cli(["network", "--since", "60s"], timeout=30)
+            try:
+                network_listing = json.loads(raw_list)
+            except json.JSONDecodeError as exc:
+                raise PlayStoreClientError(
+                    f"Invalid JSON from OpenCLI network listing: {raw_list[:200]}"
+                ) from exc
+
+            entries = network_listing.get("entries", [])
+            has_target = any(
+                isinstance(entry, dict) and str(entry.get("key", "")).startswith(detail_key)
+                for entry in entries
+            )
+
+            if has_target:
+                raw_detail = self._run_opencli_cli(
+                    ["network", "--since", "60s", "--detail", detail_key], timeout=30
+                )
+                try:
+                    envelope = json.loads(raw_detail)
+                except json.JSONDecodeError as exc:
+                    raise PlayStoreClientError(
+                        f"Invalid JSON from experiments overview capture: {raw_detail[:200]}"
+                    ) from exc
+
+                try:
+                    self._extract_store_listing_experiments_payload(envelope)
+                    return envelope
+                except PlayStoreClientError as exc:
+                    last_detail_error = exc
+
+            if time.monotonic() >= deadline:
+                if last_detail_error is not None:
+                    raise last_detail_error
+                raise PlayStoreClientError(
+                    "Timed out waiting for experiments overview startupData response"
+                )
+
+            time.sleep(1)
+
     def get_custom_store_listings(
         self,
         package_name: str,
@@ -4522,25 +4615,19 @@ class PlayStoreClient:
             f"/app/{app_id}/store-listing-experiments/overview"
         )
         self._run_opencli_cli(["open", url], timeout=45)
-        time.sleep(3)
         self._run_opencli_cli(["eval", "location.reload(); 'ok'"], timeout=30)
-        time.sleep(4)
 
         detail_key = (
             "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
             "storelistingexperiments/overview:startupData"
         )
-        raw = self._run_opencli_cli(["network", "--since", "60s", "--detail", detail_key], timeout=30)
+        envelope = self._capture_store_listing_experiments_envelope(detail_key)
+        body_b64 = self._extract_store_listing_experiments_payload(envelope)
+
         try:
-            envelope = json.loads(raw)
-        except json.JSONDecodeError:
-            raise PlayStoreClientError(f"Invalid JSON from experiments overview capture: {raw[:200]}")
-
-        body_b64 = envelope.get("body", {}).get("2")
-        if not body_b64:
-            return StoreListingExperimentsResult(package_name=package_name, experiments=[])
-
-        decoded = self._decode_protobuf_generic(base64.b64decode(body_b64))
+            decoded = self._decode_protobuf_generic(base64.b64decode(body_b64))
+        except Exception as exc:
+            raise PlayStoreClientError("Failed to decode experiments overview payload") from exc
         experiments: list[StoreListingExperimentSummary] = []
         for exp_msg in decoded.get(1, []):
             if not isinstance(exp_msg, dict):
