@@ -2084,6 +2084,50 @@ def get_experiment_report_raw(
     return result.model_dump()
 
 
+@mcp.tool()
+def get_playstore_search_rank(
+    package_name: str,
+    keyword: str,
+    country: str = "US",
+) -> dict[str, Any]:
+    """Find where an app ranks for a keyword in real, live Play Store consumer search (OpenCLI).
+
+    Unlike Google Keyword Planner (which measures Google WEB search volume,
+    not Play Store in-app search -- these are different systems and can
+    diverge significantly), this loads the actual public Play Store search
+    results page (play.google.com/store/search) and finds the app's real
+    position. This is the closest first-party signal available for
+    "does this keyword actually surface this app in the store" without a
+    Play Console session or a paid third-party ASO tool.
+
+    It does NOT require login -- the consumer search page is public.
+
+    LIMITATION: Play Store search results are infinite-scroll; this checks
+    only the first batch rendered on page load (~30 results observed). An
+    app not found there may simply rank beyond what renders, not be
+    completely absent. `results_checked` tells you how many were actually
+    checked -- treat a `rank: null` result as "not in the top N", not
+    "unranked."
+
+    Args:
+        package_name: App package name to look for (e.g. com.example.app)
+        keyword: Search query to test
+        country: Country code for the search (gl= param), default "US"
+
+    Returns:
+        rank: 1-indexed position, or null if not found in results_checked
+        results_checked: how many results were actually rendered/checked
+        top_results: package names of the top-ranked apps, for context
+    """
+    client = get_client_from_context()
+    result = client.get_playstore_search_rank(
+        package_name=package_name,
+        keyword=keyword,
+        country=country,
+    )
+    return result.model_dump()
+
+
 # =============================================================================
 # In-App Products CRUD Tools
 # =============================================================================
