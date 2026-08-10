@@ -1589,7 +1589,7 @@ def get_crash_rate(
 ) -> dict[str, Any]:
     f"""Query daily crash rate from Play Developer Reporting API.
 
-    Returns crashRate (ratio of sessions with crash), crashCount, and distinctUsers
+    Returns crashRate, crashRate7dUserWeighted, crashRate28dUserWeighted, userPerceivedCrashRate, and distinctUsers
     per day over the requested period.
 
     {_VITALS_PERMISSION_NOTE}
