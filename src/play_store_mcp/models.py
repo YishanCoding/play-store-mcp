@@ -628,6 +628,28 @@ class ExperimentReportRaw(BaseModel):
     text_strings: list[str] = Field(default_factory=list, description="Readable UTF-8 string runs found in the report payload, deduplicated, longest first")
 
 
+class PlayStoreSearchRankResult(BaseModel):
+    """Where an app actually ranks for a keyword in real, live Play Store consumer search.
+
+    This is the ONLY first-party signal for Play Store in-store keyword
+    relevance that doesn't require a Play Console session or a paid
+    third-party ASO tool -- it just loads the public, unauthenticated
+    consumer search results page (play.google.com/store/search) and finds
+    the app's position. It measures relevance/ranking, not search *volume*
+    (Google doesn't expose that for in-store search to anyone). Compare
+    against Google Keyword Planner numbers with caution: KP measures
+    Google web search volume, not Play Store in-app search volume -- the
+    two are different systems and can diverge significantly.
+    """
+
+    keyword: str = Field(..., description="The search query tested")
+    country: str = Field(..., description="Country code used for the search (gl= param)")
+    package_name: str = Field(..., description="App package name being ranked")
+    rank: int | None = Field(None, description="1-indexed position in results, or None if not found in the results actually rendered")
+    results_checked: int = Field(0, description="How many results were rendered/checked (Play Store search is infinite-scroll; this is not necessarily the full result set)")
+    top_results: list[str] = Field(default_factory=list, description="Package names of the top-ranked apps, in order, for context")
+
+
 # ---------------------------------------------------------------------------
 # New models for missing API coverage
 # ---------------------------------------------------------------------------

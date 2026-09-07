@@ -51,6 +51,7 @@ from play_store_mcp.models import (
     ListingDeleteResult,
     ListingUpdateResult,
     Order,
+    PlayStoreSearchRankResult,
     ProductPurchase,
     ProductPurchaseOperationResult,
     RefundResult,
@@ -4728,4 +4729,63 @@ class PlayStoreClient:
             experiment_id=experiment_id,
             image_urls=image_urls,
             text_strings=unique_texts[:50],
+        )
+
+    def get_playstore_search_rank(
+        self,
+        package_name: str,
+        keyword: str,
+        country: str = "US",
+    ) -> PlayStoreSearchRankResult:
+        """Find where an app ranks for a keyword in real, live Play Store consumer search.
+
+        Unlike Google Keyword Planner (which measures Google web search volume,
+        not Play Store in-app search), this loads the actual public consumer
+        search results page and finds the app's position. It doesn't require
+        OpenCLI to be logged into anything -- play.google.com/store/search is
+        public -- but still uses OpenCLI browser automation since there's no
+        API for Play Store's in-app search either.
+
+        LIMITATION: Play Store search results are infinite-scroll; this reads
+        only the first batch actually rendered on page load (~30 results as
+        observed). An app not found in that batch is NOT necessarily unranked
+        overall -- it may simply rank beyond what renders without scrolling.
+        `results_checked` tells you how many were actually checked.
+
+        Args:
+            package_name: App package name to look for (e.g. com.example.app)
+            keyword: Search query to test
+            country: Country code for the search (gl= param), default "US"
+
+        Returns:
+            PlayStoreSearchRankResult with rank (or None if not in the checked
+            results) and the top-ranked competitors for context.
+        """
+        import urllib.parse
+
+        query = urllib.parse.quote_plus(keyword)
+        url = f"https://play.google.com/store/search?q={query}&c=apps&gl={country}"
+        self._run_opencli_cli(["open", url], timeout=45)
+        time.sleep(3)
+
+        raw = self._run_opencli_cli(["extract"], timeout=30)
+        try:
+            envelope = json.loads(raw)
+        except json.JSONDecodeError:
+            raise PlayStoreClientError(f"Invalid JSON from Play Store search extract: {raw[:200]}")
+
+        content = envelope.get("content", "")
+        app_ids = re.findall(r"\]\(/store/apps/details\?id=([^)]+)\)", content)
+
+        rank = None
+        if package_name in app_ids:
+            rank = app_ids.index(package_name) + 1
+
+        return PlayStoreSearchRankResult(
+            keyword=keyword,
+            country=country,
+            package_name=package_name,
+            rank=rank,
+            results_checked=len(app_ids),
+            top_results=app_ids[:10],
         )
