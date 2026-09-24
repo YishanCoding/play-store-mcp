@@ -18,10 +18,28 @@ class UsageError(Exception):
 
 
 class CliParser(argparse.ArgumentParser):
-    """ArgumentParser that raises UsageError instead of exiting."""
+    """ArgumentParser that raises UsageError instead of exiting.
+
+    Abbreviation is disabled at every layer so ``--pack`` cannot stand in
+    for ``--package`` and skip dest-normalized conflict checks.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> None:  # type: ignore[override]
         raise UsageError(message)
+
+
+def _parse_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --limit: {value}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("--limit must be >= 1")
+    return parsed
 
 
 def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
@@ -140,7 +158,7 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, with_defaults: bool) -
     format_default = {"default": "json"} if with_defaults else {"default": argparse.SUPPRESS}
     parser.add_argument("--format", choices=["json", "table", "ndjson"], **format_default)
     parser.add_argument("--fields", help="comma-separated field paths", **default)
-    parser.add_argument("--limit", type=int, **default)
+    parser.add_argument("--limit", type=_parse_limit, **default)
     parser.add_argument("--all", action="store_true", **default)
     parser.add_argument("--yes", action="store_true", help="execute write commands", **default)
     parser.add_argument("--verbose", action="store_true", **default)
@@ -185,7 +203,7 @@ def _add_tool_flags(parser: argparse.ArgumentParser, spec: ToolSpec) -> None:
             parser.add_argument(
                 name,
                 nargs=nargs,
-                default=argparse.SUPPRESS if is_required else param.default,
+                default=argparse.SUPPRESS,
                 help=f"{name} (positional id)",
             )
             continue
@@ -198,10 +216,7 @@ def _add_tool_flags(parser: argparse.ArgumentParser, spec: ToolSpec) -> None:
             kwargs["type"] = float
         elif _is_list(annotation) or _is_dict(annotation):
             kwargs["type"] = _parse_json_or_csv
-        if param.default is inspect.Parameter.empty:
-            kwargs["default"] = argparse.SUPPRESS
-        else:
-            kwargs["default"] = param.default
+        kwargs["default"] = argparse.SUPPRESS
         parser.add_argument(flag, dest=name, **kwargs)
 
 
@@ -214,14 +229,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Google Play Console CLI",
         parents=[parent],
     )
-    sub = parser.add_subparsers(dest="cli_command")
+    sub = parser.add_subparsers(dest="cli_command", parser_class=CliParser)
 
     tools_p = sub.add_parser("tools", parents=[child], help="list commands as JSON")
     tools_p.add_argument("--json", action="store_true", default=True)
     tools_p.set_defaults(mcp_tool=None, handler="tools")
 
     auth_p = sub.add_parser("auth", parents=[child], help="credential helpers")
-    auth_sub = auth_p.add_subparsers(dest="verb")
+    auth_sub = auth_p.add_subparsers(dest="verb", parser_class=CliParser)
     check_p = auth_sub.add_parser("check", parents=[child], help="validate credentials")
     check_p.set_defaults(mcp_tool=None, handler="auth_check", resource="auth", verb="check")
 
@@ -233,7 +248,9 @@ def build_parser() -> argparse.ArgumentParser:
     for spec in SPECS.values():
         if spec.resource not in grouped:
             resource_parser = sub.add_parser(spec.resource, parents=[child], help=spec.resource)
-            grouped[spec.resource] = resource_parser.add_subparsers(dest="verb")
+            grouped[spec.resource] = resource_parser.add_subparsers(
+                dest="verb", parser_class=CliParser
+            )
         verb_parser = grouped[spec.resource].add_parser(
             spec.verb,
             parents=[child],

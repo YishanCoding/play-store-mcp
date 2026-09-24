@@ -276,12 +276,28 @@ def _format_output(stream: TextIO, value: object, fmt: str) -> None:
         print_json(stream, value)
 
 
+def _flag_label(param: str, raw_key: str) -> str:
+    for flag, dest in _FLAG_TO_PARAM.items():
+        if dest == param:
+            return flag
+    return str(raw_key).replace("_", "-")
+
+
 def _merge_kwargs(ns: Namespace, spec: ToolSpec, argv: list[str]) -> dict[str, Any]:
+    """Build tool kwargs: explicit inputs first, function defaults last.
+
+    Parser namespaces no longer carry tool-function defaults (those are
+    SUPPRESS). Flags, positionals, --body, and --query are merged and
+    conflict-checked before any signature default is filled, so
+    `--query '{"rollout_percentage":1}'` is not overwritten by 100.0.
+    """
     fn = tool_function(spec.name)
     import inspect
 
     sig = inspect.signature(fn)
     kwargs: dict[str, Any] = {}
+    explicit = _explicit_params(ns, spec, argv)
+
     for name in sig.parameters:
         if name == "package_name":
             pkg = default_package(ns)
@@ -297,32 +313,31 @@ def _merge_kwargs(ns: Namespace, spec: ToolSpec, argv: list[str]) -> dict[str, A
         if value is not None:
             kwargs[name] = value
 
-    explicit = _explicit_params(ns, spec, argv)
-
-    def _apply_object(raw: Any, label: str, *, override: bool) -> None:
+    def _apply_object(raw: Any, label: str) -> None:
         parsed = load_json_arg(raw, label)
         if not isinstance(parsed, dict):
             raise UsageError(f"JSON {label} must be an object")
         for key, value in parsed.items():
             param = _param_name(str(key))
-            if param in kwargs and param in explicit and kwargs[param] != value:
-                flag = next((flag for flag, dest in _FLAG_TO_PARAM.items() if dest == param), str(key).replace("_", "-"))
-                raise UsageError(f"--{flag} conflicts with --{label}")
-            if override:
-                kwargs[param] = value
-            else:
-                kwargs.setdefault(param, value)
+            if param in explicit and param in kwargs and kwargs[param] != value:
+                raise UsageError(f"--{_flag_label(param, str(key))} conflicts with --{label}")
+            kwargs[param] = value
+            explicit.add(param)
 
     body_raw = _ns_get(ns, "body")
     if body_raw:
-        _apply_object(body_raw, "body", override=True)
+        _apply_object(body_raw, "body")
     query_raw = _ns_get(ns, "query")
     if query_raw:
-        _apply_object(query_raw, "query", override=False)
+        _apply_object(query_raw, "query")
 
     unknown = [name for name in kwargs if name not in sig.parameters]
     if unknown:
         raise UsageError("unknown field(s): " + ", ".join(sorted(unknown)))
+
+    for name, param in sig.parameters.items():
+        if name not in kwargs and param.default is not inspect.Parameter.empty:
+            kwargs[name] = param.default
 
     for name, param in sig.parameters.items():
         if param.default is inspect.Parameter.empty and name not in kwargs:
@@ -418,25 +433,26 @@ def _paginate_all(
                 f"--all exceeded {_MAX_ALL_PAGES} pages of reviews without reaching "
                 "the end of results; aborting"
             )
-        started = time.perf_counter()
-        page = client.list_reviews_page(
-            page_token=token, max_results=_PAGE_SIZE, **page_kwargs
+        page = _retry_read(
+            lambda: client.list_reviews_page(
+                page_token=token, max_results=_PAGE_SIZE, **page_kwargs
+            ),
+            spec,
+            verbose,
+            stderr,
         )
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        if verbose:
-            stderr.write(f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n")
         if not isinstance(page, dict):
             raise UsageError("--all is not supported for this command")
         raw_reviews = page.get("reviews") or []
         for review_data in raw_reviews:
             review_id = review_data.get("reviewId") if isinstance(review_data, dict) else None
-            if review_id:
-                if review_id in seen_ids:
-                    continue
-                seen_ids.add(review_id)
+            if review_id and review_id in seen_ids:
+                continue
             review = review_from_raw(review_data) if isinstance(review_data, dict) else None
             if review is None:
                 continue
+            if review_id:
+                seen_ids.add(review_id)
             items.append(_to_jsonable(review))
             if limit is not None and len(items) >= limit:
                 return items
@@ -465,30 +481,24 @@ def _dry_run(spec: ToolSpec, kwargs: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _call_tool(spec: ToolSpec, kwargs: dict[str, Any], verbose: bool, stderr: TextIO) -> Any:
-    fn = tool_function(spec.name)
+def _retry_read(
+    call: Callable[[], Any],
+    spec: ToolSpec,
+    verbose: bool,
+    stderr: TextIO,
+) -> Any:
+    """Retry a read-only call on 429/5xx, honoring Retry-After. Writes never use this."""
     attempts = 0
     backoff = 1.0
     last_exc: BaseException | None = None
-    max_attempts = 1 if spec.kind == "write" else READ_RETRY_ATTEMPTS
-    while attempts < max_attempts:
+    while attempts < READ_RETRY_ATTEMPTS:
         attempts += 1
         started = time.perf_counter()
         try:
-            result = fn(**kwargs)
+            result = call()
             elapsed_ms = int((time.perf_counter() - started) * 1000)
-            try:
-                _raise_for_failed_result(result)
-            except ApiError as failed:
-                if verbose:
-                    stderr.write(
-                        f"{spec.http_method} {spec.http_path} {failed.status or 'err'} {elapsed_ms}ms\n"
-                    )
-                raise
             if verbose:
-                stderr.write(
-                    f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n"
-                )
+                stderr.write(f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n")
             return result
         except Exception as exc:
             last_exc = exc
@@ -499,9 +509,7 @@ def _call_tool(spec: ToolSpec, kwargs: dict[str, Any], verbose: bool, stderr: Te
                 stderr.write(
                     f"{spec.http_method} {spec.http_path} {status or 'err'} {elapsed_ms}ms\n"
                 )
-            if spec.kind == "write":
-                raise
-            if http is None or status not in READ_RETRY_STATUSES or attempts >= max_attempts:
+            if http is None or status not in READ_RETRY_STATUSES or attempts >= READ_RETRY_ATTEMPTS:
                 raise
             retry_after = None
             if http is not None:
@@ -514,6 +522,34 @@ def _call_tool(spec: ToolSpec, kwargs: dict[str, Any], verbose: bool, stderr: Te
             backoff *= 2
     assert last_exc is not None
     raise last_exc
+
+
+def _call_tool(spec: ToolSpec, kwargs: dict[str, Any], verbose: bool, stderr: TextIO) -> Any:
+    fn = tool_function(spec.name)
+
+    def invoke() -> Any:
+        result = fn(**kwargs)
+        _raise_for_failed_result(result)
+        return result
+
+    if spec.kind == "write":
+        started = time.perf_counter()
+        try:
+            result = invoke()
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if verbose:
+                stderr.write(f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n")
+            return result
+        except Exception as exc:
+            http = _http_error(exc)
+            status = int(getattr(http.resp, "status", 0) or 0) if http is not None else None
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if verbose:
+                stderr.write(
+                    f"{spec.http_method} {spec.http_path} {status or 'err'} {elapsed_ms}ms\n"
+                )
+            raise
+    return _retry_read(invoke, spec, verbose, stderr)
 
 
 def _classify_exception(exc: BaseException) -> tuple[int, dict[str, Any]]:
@@ -629,78 +665,77 @@ def main(
                 raise AuthError(str(exc)) from exc
             raise
 
-    tool_mod.configure_client(bound_client)
+    with tool_mod._scoped_client(bound_client):
+        try:
+            handler = getattr(ns, "handler", None)
+            if handler == "tools" or ns.cli_command == "tools":
+                print_json(out, _tools_catalog())
+                return 0
+            if handler == "auth_check" or (ns.cli_command == "auth" and getattr(ns, "verb", None) == "check"):
+                _require_credentials()
+                result = _auth_check(bound_client())
+                print_json(out, result)
+                return 0
+            if handler == "smoke" or ns.cli_command == "smoke":
+                _require_credentials()
 
-    try:
-        handler = getattr(ns, "handler", None)
-        if handler == "tools" or ns.cli_command == "tools":
-            print_json(out, _tools_catalog())
+                def run_tool(name: str, kwargs: dict[str, Any]) -> Any:
+                    spec = SPECS[name]
+                    return _call_tool(spec, kwargs, bool(getattr(ns, "verbose", False)), err)
+
+                report = smoke_plan(run_tool)
+                output = Path(ns.output)
+                return write_report(output, report, out)
+
+            mcp_tool = getattr(ns, "mcp_tool", None)
+            if not mcp_tool:
+                raise UsageError("missing command")
+            spec = SPECS[mcp_tool]
+            want_all = bool(_ns_get(ns, "all"))
+            if want_all and spec.kind == "write":
+                raise UsageError("--all is not supported for write commands")
+            kwargs = _merge_kwargs(ns, spec, args_list)
+            _check_confirm(ns, spec, kwargs)
+            file_path = kwargs.get("file_path")
+            if file_path and not Path(str(file_path)).is_file():
+                raise UsageError(f"--file not found: {file_path}")
+
+            if spec.kind == "write" and not _ns_get(ns, "yes"):
+                payload = _dry_run(spec, kwargs)
+                print_json(out, payload)
+                return 0
+
+            verbose = bool(_ns_get(ns, "verbose"))
+            if want_all:
+                if not _supports_pagination(spec):
+                    raise UsageError("--all is not supported for this command")
+                result = _paginate_all(
+                    bound_client(), spec, kwargs, _ns_get(ns, "limit"), verbose, err
+                )
+            else:
+                result = _call_tool(spec, kwargs, verbose, err)
+            fields_raw = _ns_get(ns, "fields")
+            fields = [part.strip() for part in fields_raw.split(",") if part.strip()] if fields_raw else []
+            result = apply_fields(result, fields)
+            if not want_all:
+                result = apply_limit(result, _ns_get(ns, "limit"))
+            _format_output(out, result, _ns_get(ns, "format", "json") or "json")
             return 0
-        if handler == "auth_check" or (ns.cli_command == "auth" and getattr(ns, "verb", None) == "check"):
-            _require_credentials()
-            result = _auth_check(bound_client())
-            print_json(out, result)
-            return 0
-        if handler == "smoke" or ns.cli_command == "smoke":
-            _require_credentials()
-
-            def run_tool(name: str, kwargs: dict[str, Any]) -> Any:
-                spec = SPECS[name]
-                return _call_tool(spec, kwargs, bool(getattr(ns, "verbose", False)), err)
-
-            report = smoke_plan(run_tool)
-            output = Path(ns.output)
-            return write_report(output, report, out)
-
-        mcp_tool = getattr(ns, "mcp_tool", None)
-        if not mcp_tool:
-            raise UsageError("missing command")
-        spec = SPECS[mcp_tool]
-        want_all = bool(_ns_get(ns, "all"))
-        if want_all and spec.kind == "write":
-            raise UsageError("--all is not supported for write commands")
-        kwargs = _merge_kwargs(ns, spec, args_list)
-        _check_confirm(ns, spec, kwargs)
-        file_path = kwargs.get("file_path")
-        if file_path and not Path(str(file_path)).is_file():
-            raise UsageError(f"--file not found: {file_path}")
-
-        if spec.kind == "write" and not _ns_get(ns, "yes"):
-            payload = _dry_run(spec, kwargs)
-            print_json(out, payload)
-            return 0
-
-        verbose = bool(_ns_get(ns, "verbose"))
-        if want_all:
-            if not _supports_pagination(spec):
-                raise UsageError("--all is not supported for this command")
-            result = _paginate_all(
-                bound_client(), spec, kwargs, _ns_get(ns, "limit"), verbose, err
-            )
-        else:
-            result = _call_tool(spec, kwargs, verbose, err)
-        fields_raw = _ns_get(ns, "fields")
-        fields = [part.strip() for part in fields_raw.split(",") if part.strip()] if fields_raw else []
-        result = apply_fields(result, fields)
-        if not want_all:
-            result = apply_limit(result, _ns_get(ns, "limit"))
-        _format_output(out, result, _ns_get(ns, "format", "json") or "json")
-        return 0
-    except (UsageError, AuthError, ApiError) as exc:
-        code, payload = _classify_exception(exc)
-        _error(err, payload)
-        return code
-    except TypeError as exc:
-        message = str(exc)
-        if "unexpected keyword" in message or "required positional argument" in message:
-            _error(err, _usage_payload(message))
-            return 2
-        code, payload = _classify_exception(exc)
-        _error(err, payload)
-        return code
-    except Exception as exc:
-        code, payload = _classify_exception(exc)
-        if os.environ.get("GPCLI_DEBUG"):
-            traceback.print_exc(file=err)
-        _error(err, payload)
-        return code
+        except (UsageError, AuthError, ApiError) as exc:
+            code, payload = _classify_exception(exc)
+            _error(err, payload)
+            return code
+        except TypeError as exc:
+            message = str(exc)
+            if "unexpected keyword" in message or "required positional argument" in message:
+                _error(err, _usage_payload(message))
+                return 2
+            code, payload = _classify_exception(exc)
+            _error(err, payload)
+            return code
+        except Exception as exc:
+            code, payload = _classify_exception(exc)
+            if os.environ.get("GPCLI_DEBUG"):
+                traceback.print_exc(file=err)
+            _error(err, payload)
+            return code

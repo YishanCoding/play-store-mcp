@@ -156,8 +156,12 @@ class CliPlayStoreClient(PlayStoreClient):
                         .get(packageName=package_name, editId=edit_id, language=language)
                         .execute()
                     )
-                except HttpError:
-                    current_listing = {}
+                except HttpError as listing_error:
+                    status = int(getattr(listing_error.resp, "status", 0) or 0)
+                    if status == 404:
+                        current_listing = {}
+                    else:
+                        raise
 
                 update_body = {
                     "title": update.get("title", current_listing.get("title", "")),

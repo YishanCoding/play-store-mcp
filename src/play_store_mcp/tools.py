@@ -6,7 +6,9 @@ injected via configure_client() so gpcli --help does not load googleapiclient.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager as _contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -14,6 +16,9 @@ if TYPE_CHECKING:
 
 GetClient = Callable[[], Any]
 _client_provider: GetClient | None = None
+_client_override: ContextVar[GetClient | None] = ContextVar(
+    "play_store_mcp_client_override", default=None
+)
 
 
 def configure_client(provider: GetClient) -> None:
@@ -22,8 +27,24 @@ def configure_client(provider: GetClient) -> None:
     _client_provider = provider
 
 
+@_contextmanager
+def _scoped_client(provider: GetClient) -> Iterator[None]:
+    """Temporarily use `provider` for get_client() in this task, then restore.
+
+    CLI uses this so it never overwrites the process-wide MCP provider.
+    """
+    token = _client_override.set(provider)
+    try:
+        yield
+    finally:
+        _client_override.reset(token)
+
+
 def get_client() -> PlayStoreClient:
     """Return the configured PlayStoreClient."""
+    override = _client_override.get()
+    if override is not None:
+        return override()
     if _client_provider is None:
         from play_store_mcp.client import PlayStoreClientError
 
