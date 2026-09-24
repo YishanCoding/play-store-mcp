@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import sys
 import time
 import traceback
@@ -37,6 +38,10 @@ from play_store_mcp.cli.smoke import write_report
 CRED_ENV = "GOOGLE_PLAY_STORE_CREDENTIALS"
 READ_RETRY_STATUSES = {429, 500, 502, 503}
 READ_RETRY_ATTEMPTS = 3
+_HTTP_STATUS_IN_TEXT = re.compile(
+    r"<HttpError\s+(\d{3})\b|\bHttpError\s+(\d{3})\b|\"status\"\s*:\s*(\d{3})\b|\bstatus\s*[:=]\s*(\d{3})\b",
+    re.IGNORECASE,
+)
 
 
 def _configure_logging(*, verbose: bool, stream: TextIO) -> None:
@@ -294,6 +299,14 @@ def _call_tool(spec: ToolSpec, kwargs: dict[str, Any], verbose: bool, stderr: Te
         try:
             result = fn(**kwargs)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            try:
+                _raise_for_failed_result(result)
+            except ApiError as failed:
+                if verbose:
+                    stderr.write(
+                        f"{spec.http_method} {spec.http_path} {failed.status or 'err'} {elapsed_ms}ms\n"
+                    )
+                raise
             if verbose:
                 stderr.write(
                     f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n"
@@ -343,6 +356,26 @@ def _classify_exception(exc: BaseException) -> tuple[int, dict[str, Any]]:
     if isinstance(exc, ApiError):
         return 3, _api_payload(exc)
     return 3, _api_payload(exc)
+
+
+def _status_from_text(text: str) -> int | None:
+    match = _HTTP_STATUS_IN_TEXT.search(text)
+    if not match:
+        return None
+    for group in match.groups():
+        if group:
+            return int(group)
+    return None
+
+
+def _raise_for_failed_result(result: Any) -> None:
+    """CLI-only: client methods that swallow HttpError still return success=false."""
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return
+    chunks = [result.get("error"), result.get("message"), result.get("detail")]
+    text = " ".join(str(chunk) for chunk in chunks if chunk)
+    status = _status_from_text(text)
+    raise ApiError(text or "API request failed", status=status)
 
 
 def _auth_check(client: Any) -> dict[str, Any]:

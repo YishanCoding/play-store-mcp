@@ -15,6 +15,7 @@ from googleapiclient.errors import HttpError
 from play_store_mcp.cli import main
 from play_store_mcp.cli.catalog import BROWSER_CAPABILITIES, SPECS
 from play_store_mcp.cli.parser import build_parser
+from play_store_mcp.models import ReviewReplyResult
 
 
 def _mcp_tool_count() -> int:
@@ -264,6 +265,42 @@ def test_usage_error_exit_2(monkeypatch: pytest.MonkeyPatch) -> None:
     assert code == 2, err
     payload = json.loads(err)
     assert payload["error"]["type"] == "usage"
+
+
+def test_swallowed_write_failure_exit_3() -> None:
+    """Client reply_to_review swallows HttpError into success=False; CLI must still exit 3."""
+    client = MagicMock()
+    client.reply_to_review.return_value = ReviewReplyResult(
+        success=False,
+        review_id="rev-1",
+        message="Failed to reply: Not Found",
+        error=(
+            '<HttpError 404 when requesting https://androidpublisher.googleapis.com/'
+            'androidpublisher/v3/applications/com.example.app/reviews/rev-1:reply?alt=json '
+            'returned "Not Found">'
+        ),
+    )
+    code, out, err = _run(
+        [
+            "review",
+            "reply",
+            "rev-1",
+            "--package",
+            "com.example.app",
+            "--reply-text",
+            "Thanks",
+            "--yes",
+            "--confirm",
+            "com.example.app",
+        ],
+        client=client,
+    )
+    assert code == 3, err
+    assert out == ""
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "api"
+    assert payload["error"]["status"] == 404
+    client.reply_to_review.assert_called_once()
 
 
 def test_api_httperror_exit_3() -> None:
