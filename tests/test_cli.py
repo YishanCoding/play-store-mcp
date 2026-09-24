@@ -406,6 +406,77 @@ def test_f01_yes_flag_both_positions(yes_before: bool) -> None:
     assert kwargs["review_id"] == "rev-1"
 
 
+def test_package_flag_conflicting_values_exit_2() -> None:
+    """R2 P3: --package given twice with different values must be rejected,
+    not silently resolved to whichever occurrence argparse parses last."""
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "--package",
+            "com.a",
+            "listing",
+            "update",
+            "--language",
+            "en-US",
+            "--title",
+            "T",
+            "--package",
+            "com.b",
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    assert client.mock_calls == []
+
+
+def test_package_flag_repeated_same_value_ok() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "--package",
+            "com.a",
+            "listing",
+            "update",
+            "--language",
+            "en-US",
+            "--title",
+            "T",
+            "--package",
+            "com.a",
+        ],
+        client=client,
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["dry_run"] is True
+
+
+def test_confirm_matches_int_developer_id() -> None:
+    """R2 P3: --confirm arrives as a str; a body developer_id of int 1 must
+    still match --confirm 1 instead of failing str != int."""
+    client = MagicMock()
+    client.update_user.return_value = MagicMock()
+    code, out, err = _run(
+        [
+            "user",
+            "update",
+            "a@example.com",
+            "--access-state",
+            "accessGranted",
+            "--body",
+            json.dumps({"developer_id": 1}),
+            "--confirm",
+            "1",
+            "--yes",
+        ],
+        client=client,
+    )
+    assert code == 0, err
+    client.update_user.assert_called_once()
+
+
 @pytest.mark.parametrize("limit_before", [True, False])
 def test_f01_limit_flag_both_positions(limit_before: bool) -> None:
     client = MagicMock()
@@ -515,42 +586,117 @@ def test_f04_body_conflicts_with_positional() -> None:
     assert client.mock_calls == []
 
 
-def test_f05_all_paginates_reviews() -> None:
+def _raw_review(review_id: str, *, with_user_comment: bool = True) -> dict[str, Any]:
+    comments: list[dict[str, Any]] = []
+    if with_user_comment:
+        comments.append(
+            {"userComment": {"text": "hello", "starRating": 5, "reviewerLanguage": "en"}}
+        )
+    return {"reviewId": review_id, "authorName": "x", "comments": comments}
+
+
+def test_f05_all_paginates_reviews_via_token() -> None:
+    """R2-F02/F03: --all pages with tokenPagination.nextPageToken, not start_index."""
     client = MagicMock()
+    pages = [
+        {
+            "reviews": [_raw_review("r1"), _raw_review("r2")],
+            "tokenPagination": {"nextPageToken": "tok-2"},
+        },
+        {
+            "reviews": [_raw_review("r3")],
+            "tokenPagination": {},
+        },
+    ]
 
-    def side_effect(**kwargs: Any) -> list[MagicMock]:
-        start = int(kwargs.get("start_index") or 0)
-        size = int(kwargs.get("max_results") or 100)
-        total = 150
-        return [_review_item(f"r{i}") for i in range(start, min(start + size, total))]
+    def side_effect(**_kwargs: Any) -> dict[str, Any]:
+        return pages.pop(0)
 
-    client.get_reviews.side_effect = side_effect
+    client.list_reviews_page.side_effect = side_effect
     code, out, err = _run(
         ["review", "list", "--package", "com.example.app", "--all"],
         client=client,
     )
     assert code == 0, err
     payload = json.loads(out)
-    assert len(payload) == 150
-    assert client.get_reviews.call_count == 2
-    first = client.get_reviews.call_args_list[0].kwargs
-    second = client.get_reviews.call_args_list[1].kwargs
-    assert first["start_index"] == 0
-    assert first["max_results"] == 100
-    assert second["start_index"] == 100
-    assert second["max_results"] == 100
+    assert [item["review_id"] for item in payload] == ["r1", "r2", "r3"]
+    assert client.list_reviews_page.call_count == 2
+    first = client.list_reviews_page.call_args_list[0].kwargs
+    second = client.list_reviews_page.call_args_list[1].kwargs
     assert first["package_name"] == "com.example.app"
+    assert first["page_token"] is None
+    assert second["page_token"] == "tok-2"
+
+
+def test_f05_all_does_not_stop_early_when_a_review_is_filtered() -> None:
+    """R2-F03: a page with a filtered-out review must not truncate --all."""
+    client = MagicMock()
+    pages = [
+        {
+            "reviews": [
+                _raw_review("r1"),
+                _raw_review("r2", with_user_comment=False),  # filtered, no userComment
+                _raw_review("r3"),
+            ],
+            "tokenPagination": {"nextPageToken": "tok-2"},
+        },
+        {
+            "reviews": [_raw_review("r4")],
+            "tokenPagination": {},
+        },
+    ]
+    client.list_reviews_page.side_effect = lambda **_kwargs: pages.pop(0)
+    code, out, err = _run(
+        ["review", "list", "--package", "com.example.app", "--all"],
+        client=client,
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    # r2 is dropped (no userComment); r1/r3/r4 all survive across both pages.
+    assert [item["review_id"] for item in payload] == ["r1", "r3", "r4"]
+    assert client.list_reviews_page.call_count == 2
+
+
+def test_f05_all_dedupes_repeated_review_ids() -> None:
+    client = MagicMock()
+    pages = [
+        {"reviews": [_raw_review("r1"), _raw_review("r2")], "tokenPagination": {"nextPageToken": "tok-2"}},
+        # a misbehaving/overlapping server re-sends r2 alongside a new r3
+        {"reviews": [_raw_review("r2"), _raw_review("r3")], "tokenPagination": {}},
+    ]
+    client.list_reviews_page.side_effect = lambda **_kwargs: pages.pop(0)
+    code, out, err = _run(
+        ["review", "list", "--package", "com.example.app", "--all"],
+        client=client,
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert [item["review_id"] for item in payload] == ["r1", "r2", "r3"]
+
+
+def test_f05_all_stops_at_page_limit_when_server_ignores_pagination() -> None:
+    """R2-F02: a server that ignores the pagination token must not hang the CLI."""
+    client = MagicMock()
+    client.list_reviews_page.return_value = {
+        "reviews": [_raw_review("r1")],
+        "tokenPagination": {"nextPageToken": "same-token-forever"},
+    }
+    code, out, err = _run(
+        ["review", "list", "--package", "com.example.app", "--all"],
+        client=client,
+    )
+    assert code == 3, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "api"
+    assert client.list_reviews_page.call_count == 100
 
 
 def test_f05_all_with_limit_is_cap() -> None:
     client = MagicMock()
-
-    def side_effect(**kwargs: Any) -> list[MagicMock]:
-        start = int(kwargs.get("start_index") or 0)
-        size = int(kwargs.get("max_results") or 100)
-        return [_review_item(f"r{i}") for i in range(start, start + size)]
-
-    client.get_reviews.side_effect = side_effect
+    client.list_reviews_page.return_value = {
+        "reviews": [_raw_review(f"r{i}") for i in range(10)],
+        "tokenPagination": {"nextPageToken": "tok-2"},
+    }
     code, out, err = _run(
         ["--all", "--limit", "5", "review", "list", "--package", "com.example.app"],
         client=client,
@@ -558,8 +704,30 @@ def test_f05_all_with_limit_is_cap() -> None:
     assert code == 0, err
     payload = json.loads(out)
     assert len(payload) == 5
-    assert client.get_reviews.call_args.kwargs["max_results"] == 5
-    assert client.get_reviews.call_args.kwargs["start_index"] == 0
+    # Limit reached on the first page: no second page fetch needed.
+    assert client.list_reviews_page.call_count == 1
+
+
+def test_f05_all_write_command_exit_2() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "review",
+            "reply",
+            "rev-1",
+            "--package",
+            "com.example.app",
+            "--reply-text",
+            "Thanks",
+            "--all",
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    assert "--all" in payload["error"]["message"]
+    assert client.mock_calls == []
 
 
 def test_f05_all_unsupported_command_exit_2() -> None:

@@ -83,6 +83,36 @@ class ApiError(Exception):
         self.code = code
 
 
+def _duplicate_flag_values(argv: list[str], flag: str) -> list[str]:
+    """Distinct values passed for `flag` (e.g. `--package`) across argv.
+
+    `flag` can legally appear both before and after the subcommand (global
+    vs. subcommand parser), and argparse silently lets the later occurrence
+    win. Returns the distinct values seen, in first-seen order, so the
+    caller can reject >1 distinct value instead of silently picking the
+    last one.
+    """
+    values: list[str] = []
+    seen: set[str] = set()
+    i = 0
+    prefix = flag + "="
+    while i < len(argv):
+        token = argv[i]
+        if token == flag and i + 1 < len(argv):
+            value = argv[i + 1]
+            i += 2
+        elif token.startswith(prefix):
+            value = token[len(prefix) :]
+            i += 1
+        else:
+            i += 1
+            continue
+        if value not in seen:
+            seen.add(value)
+            values.append(value)
+    return values
+
+
 def _ns_get(ns: Namespace, name: str, default: Any = None) -> Any:
     value = getattr(ns, name, default)
     if value is argparse.SUPPRESS:
@@ -206,11 +236,12 @@ def _require_credentials() -> str:
 
 
 def _make_client() -> Any:
-    from play_store_mcp.client import PlayStoreClient, PlayStoreClientError
+    from play_store_mcp.cli.client import CliPlayStoreClient
+    from play_store_mcp.client import PlayStoreClientError
 
     creds = _require_credentials()
     try:
-        client = PlayStoreClient(credentials_json=creds)
+        client = CliPlayStoreClient(credentials_json=creds)
         return client
     except PlayStoreClientError as exc:
         raise AuthError(str(exc)) from exc
@@ -322,16 +353,20 @@ def _check_confirm(ns: Namespace, spec: ToolSpec, kwargs: dict[str, Any]) -> Non
         if developer_id:
             raise UsageError("--confirm <developer-id> is required for this command")
         raise UsageError("--confirm is required for this command")
+    # --confirm always arrives as a str (argparse); body/query values such as
+    # developer_id may come in as JSON numbers. Compare as strings so
+    # `--confirm 1` matches a body developer_id of 1 (int).
+    confirm_str = str(confirm)
     if package:
-        if confirm != package:
+        if confirm_str != str(package):
             raise UsageError("--confirm does not match --package")
         return
     if developer_id:
-        if confirm != developer_id:
+        if confirm_str != str(developer_id):
             raise UsageError("--confirm does not match --developer-id")
         return
     positional = kwargs.get(spec.positional) if spec.positional else None
-    if positional and confirm != positional:
+    if positional and confirm_str != str(positional):
         raise UsageError(f"--confirm does not match {spec.positional}")
 
 
@@ -339,18 +374,7 @@ def _supports_pagination(spec: ToolSpec) -> bool:
     return spec.kind == "read" and spec.name in PAGEABLE_TOOLS
 
 
-def _client_call_kwargs(method: Any, kwargs: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
-    import inspect
-
-    merged = {**kwargs, **extra}
-    try:
-        sig = inspect.signature(method)
-    except (TypeError, ValueError):
-        return merged
-    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
-        return merged
-    accepted = set(sig.parameters)
-    return {key: value for key, value in merged.items() if key in accepted}
+_MAX_ALL_PAGES = 100
 
 
 def _paginate_all(
@@ -361,32 +385,65 @@ def _paginate_all(
     verbose: bool,
     stderr: TextIO,
 ) -> list[Any]:
-    method = getattr(client, spec.name)
+    """Fetch every page for a `--all` command.
+
+    Only `get_reviews` is in PAGEABLE_TOOLS today. It pages through the raw
+    Play Developer API `reviews().list()` response using the server's own
+    `tokenPagination.nextPageToken` (never a `startIndex` offset, which the
+    server is free to ignore — R2-F02), and only applies the
+    "drop reviews without userComment" filter after paging, on each page's
+    raw items, so a filtered-out review on a page can never look like an
+    empty/short page and end the loop early (R2-F03). Duplicate review ids
+    across pages are skipped, and pagination stops with an error after
+    `_MAX_ALL_PAGES` pages so a misbehaving server can't hang the CLI.
+    """
+    from play_store_mcp.cli.client import review_from_raw
+
+    if spec.name != "get_reviews":
+        raise UsageError("--all is not supported for this command")
+
+    page_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key in {"package_name", "translation_language"}
+    }
     items: list[Any] = []
-    start = 0
+    seen_ids: set[str] = set()
+    token: str | None = None
+    pages = 0
     while True:
-        remaining = None if limit is None else max(limit - len(items), 0)
-        if remaining == 0:
-            break
-        fetch = _PAGE_SIZE if remaining is None else min(_PAGE_SIZE, remaining)
-        call_kwargs = _client_call_kwargs(
-            method, kwargs, {"max_results": fetch, "start_index": start}
-        )
+        pages += 1
+        if pages > _MAX_ALL_PAGES:
+            raise ApiError(
+                f"--all exceeded {_MAX_ALL_PAGES} pages of reviews without reaching "
+                "the end of results; aborting"
+            )
         started = time.perf_counter()
-        page = method(**call_kwargs)
+        page = client.list_reviews_page(
+            page_token=token, max_results=_PAGE_SIZE, **page_kwargs
+        )
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         if verbose:
             stderr.write(f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n")
-        dumped = _to_jsonable(page)
-        if not isinstance(dumped, list):
+        if not isinstance(page, dict):
             raise UsageError("--all is not supported for this command")
-        items.extend(dumped)
-        if len(dumped) < fetch:
+        raw_reviews = page.get("reviews") or []
+        for review_data in raw_reviews:
+            review_id = review_data.get("reviewId") if isinstance(review_data, dict) else None
+            if review_id:
+                if review_id in seen_ids:
+                    continue
+                seen_ids.add(review_id)
+            review = review_from_raw(review_data) if isinstance(review_data, dict) else None
+            if review is None:
+                continue
+            items.append(_to_jsonable(review))
+            if limit is not None and len(items) >= limit:
+                return items
+        token = (page.get("tokenPagination") or {}).get("nextPageToken")
+        if not token:
             break
-        start += len(dumped)
-        if start <= 0:
-            break
-    return items[:limit] if limit is not None else items
+    return items
 
 
 def _dry_run(spec: ToolSpec, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -546,6 +603,11 @@ def main(
     finally:
         sys.stdout, sys.stderr = old_out, old_err
 
+    dup = _duplicate_flag_values(args_list, "--package")
+    if len(dup) > 1:
+        _error(err, _usage_payload(f"--package given multiple times with different values: {dup}"))
+        return 2
+
     from play_store_mcp import tools as tool_mod
 
     _configure_logging(verbose=bool(getattr(ns, "verbose", False)), stream=err)
@@ -594,6 +656,9 @@ def main(
         if not mcp_tool:
             raise UsageError("missing command")
         spec = SPECS[mcp_tool]
+        want_all = bool(_ns_get(ns, "all"))
+        if want_all and spec.kind == "write":
+            raise UsageError("--all is not supported for write commands")
         kwargs = _merge_kwargs(ns, spec, args_list)
         _check_confirm(ns, spec, kwargs)
         file_path = kwargs.get("file_path")
@@ -606,7 +671,6 @@ def main(
             return 0
 
         verbose = bool(_ns_get(ns, "verbose"))
-        want_all = bool(_ns_get(ns, "all"))
         if want_all:
             if not _supports_pagination(spec):
                 raise UsageError("--all is not supported for this command")
