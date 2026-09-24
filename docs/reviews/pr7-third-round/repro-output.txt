@@ -1,0 +1,16 @@
+OFFLINE: 5 original CLI blobs verified; 8/80 selected tool definitions; Google SDK and FastMCP boundaries mocked.
+{"probe": "F01", "final_release_bodies": {"query": {"versionCodes": ["1"], "releaseNotes": [], "status": "completed"}, "body": {"versionCodes": ["1"], "releaseNotes": [], "status": "inProgress", "userFraction": 0.01}, "flag": {"versionCodes": ["1"], "releaseNotes": [], "status": "inProgress", "userFraction": 0.01}}, "rc": 0, "request_order": ["create", "get", "update", "commit"]}
+.{"probe": "F02", "variant": "body", "rc": 0, "actual_package": "com.b", "full_spelling_rc": 2, "dry_run_client_calls": 0}
+.{"probe": "F02", "variant": "query", "rc": 0, "actual_package": "com.a", "full_spelling_rc": 2, "dry_run_client_calls": 0}
+.{"probe": "F02", "variant": "duplicate", "rc": 0, "actual_package": "com.b", "full_spelling_rc": 2, "dry_run_client_calls": 0}
+.{"probe": "F03", "rc": 0, "success": true, "update_bodies": {"success": {"title": "New", "fullDescription": "KEEP full", "shortDescription": "KEEP short", "video": "https://www.youtube.com/watch?v=example"}, "503": {"title": "New", "fullDescription": "", "shortDescription": ""}}, "request_order": ["create", "get-503", "update", "commit"]}
+..{"probe": "F04", "rc": 0, "expected_valid_ids": ["r1", "r2"], "actual_ids": ["r2"], "request_kwargs": [{"packageName": "com.example.app", "maxResults": 100}, {"packageName": "com.example.app", "maxResults": 100, "token": "T2"}]}
+.{"probe": "F05", "rc": 0, "limit": 0, "returned_count": 1, "requests": 1}
+.{"probe": "F06", "pre_cli_mcp": [{"review_id": "MCP"}], "post_cli_mcp": [{"review_id": "CLI"}], "cli_dry_run": true, "same_process_only": true, "post_client_class": "CliPlayStoreClient"}
+........{"probe": "control_229", "rc": 0, "count": 229, "requests": 3}
+.{"probe": "control_cap", "terminal": false, "rc": 3, "requests": 100}
+.{"probe": "control_cap", "terminal": true, "rc": 0, "requests": 100}
+.{"probe": "control_limit", "rc": 0, "count": 3, "requests": 2}
+..{"probe": "F07", "all_rc": 3, "all_attempts": 1, "non_all_rc": 0, "non_all_attempts": 2}
+.
+22 passed in 0.37s
