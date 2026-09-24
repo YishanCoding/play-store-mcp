@@ -78,9 +78,9 @@ gpcli smoke --output <path>    # 只读线上验收（统一约定 §6）
 
 ### 对 MCP 运行时的有意偏离
 
-| 位置 | main 行为 | 本分支行为 | 理由 |
+| 位置 | 基线行为 | 本分支行为 | 理由 |
 |---|---|---|---|
-| `src/play_store_mcp/tools.py` `get_client()` | 只读进程级 `_client_provider` | 先查 contextvar `_client_override`（由 `_scoped_client()` 在 CLI 调用期间设置、`finally` 复原），为空时回落到 `_client_provider` | 第四轮 F06：CLI 不能改写同进程 MCP 的全局 provider。MCP 从不设置 override，所以 override 为空时，MCP 路径与 main 等价。tools/list 全量 diff 为 0 |
+| `src/play_store_mcp/tools.py` `get_client()` | origin/main 没有 tools.py，MCP 工具直接调用 server.py 的 `get_client_from_context`；本 PR 抽出 tools.py 后，最初只读进程级 `_client_provider` | 先查 contextvar `_client_override`（由 `_scoped_client()` 在 CLI 调用期间设置、`finally` 复原），为空时回落到 `_client_provider` | 第四轮 F06：CLI 不能改写同进程 MCP 的全局 provider。MCP 从不设置 override，所以 override 为空时，MCP 路径与 main 等价。tools/list 全量 diff 为 0 |
 
 ## 5. 验收（Claude 执行，全部通过才算完成）
 
