@@ -33,7 +33,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.26.0",
+    "mcp>=1.26.0,<2",
     "google-api-python-client>=2.180.0",
     "google-auth>=2.40.0",
     "pydantic>=2.10.0",
@@ -51,6 +51,7 @@ dev = [
 
 [project.scripts]
 play-store-mcp = "play_store_mcp:main"
+gpcli = "play_store_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/lusky3/play-store-mcp"
@@ -126,6 +127,33 @@ ignore = [
 ]
 "src/play_store_mcp/client.py" = [
     "C901",    # complexity in _get_service is acceptable for credential handling
+]
+"src/play_store_mcp/cli/*.py" = [
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "BLE001",
+    "S110",
+    "S105",
+    "SLF001",
+    "TC003",
+    "RUF001",
+]
+"src/play_store_mcp/tools.py" = [
+    "B021",
+    "E501",
+    "RUF001",
+    "PLC0415",
+]
+"src/play_store_mcp/__init__.py" = [
+    "PLC0415",
+]
+"tests/test_cli.py" = [
+    "S603",
+    "RUF059",
+    "RUF001",
 ]
 
 [tool.ruff.lint.isort]
