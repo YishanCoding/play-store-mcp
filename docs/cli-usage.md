@@ -8,7 +8,7 @@ uv tool install --reinstall -e /Users/yishan/本地编程开发/Googleplay-mcp-c
 
 凭据只读环境变量 `GOOGLE_PLAY_STORE_CREDENTIALS`（服务账号 JSON 路径）。可用 `GPCLI_PACKAGE` 作为 `--package` 默认值。
 
-写命令默认 dry-run；加 `--yes` 才执行。高风险命令还要 `--confirm <包名>`，且必须与 `--package` 一致。
+写命令默认 dry-run；加 `--yes` 才执行。高风险命令还要 `--confirm`：有 `--package` 时必须与包名一致；`user create|update|delete` 没有包名，必须与 `--developer-id` 一致。`--all` 只对支持 `start_index` 分页的读命令生效（目前是 `review list`）；其它命令传 `--all` 会以退出码 2 拒绝。
 
 ## 自描述与验收
 
@@ -107,7 +107,8 @@ gpcli deobfuscation-file upload --package com.vast.jujubit --version-code 100 --
 
 ```bash
 gpcli user list --developer-id DEV
-gpcli grant create USER@example.com --developer-id DEV --package com.vast.jujubit --app-level-permissions '["canReplyToReviews"]'
+gpcli user delete USER@example.com --developer-id DEV --confirm DEV
+gpcli grant create USER@example.com --developer-id DEV --package com.vast.jujubit --app-level-permissions '["canReplyToReviews"]' --confirm com.vast.jujubit
 ```
 
 MCP 工具的 kebab-case 名仍可用，例如 `gpcli reply-to-review REVIEW_ID --package com.vast.jujubit --reply-text "Thanks"`。

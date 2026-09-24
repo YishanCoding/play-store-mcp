@@ -2043,6 +2043,7 @@ class PlayStoreClient:
         except HttpError as e:
             self._logger.exception("Failed to batch update listings", error=str(e))
             self._delete_edit(package_name, edit_id)
+            status = int(getattr(e.resp, "status", 0) or 0) or None
             return ListingBatchUpdateResult(
                 success=False,
                 package_name=package_name,
@@ -2050,7 +2051,7 @@ class PlayStoreClient:
                 edit_id=edit_id,
                 validated_languages=validated_languages,
                 updated_languages=updated_languages,
-                errors=[{"message": f"Failed to batch update listings: {e.reason}"}],
+                errors=[{"message": str(e), "status": status}],
                 message="Failed to batch update listings; edit was deleted.",
             )
         except Exception as e:

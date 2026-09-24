@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import mimetypes
@@ -15,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
-from play_store_mcp.cli.catalog import BROWSER_CAPABILITIES, SPECS, ToolSpec
+from play_store_mcp.cli.catalog import BROWSER_CAPABILITIES, PAGEABLE_TOOLS, SPECS, ToolSpec
 from play_store_mcp.cli.output import (
     apply_fields,
     apply_limit,
@@ -32,6 +33,13 @@ from play_store_mcp.cli.parser import (
     load_json_arg,
     tool_function,
 )
+
+# argparse dest / --body keys → tool parameter names
+_FLAG_TO_PARAM: dict[str, str] = {
+    "package": "package_name",
+    "file": "file_path",
+}
+_PAGE_SIZE = 100
 from play_store_mcp.cli.smoke import plan as smoke_plan
 from play_store_mcp.cli.smoke import write_report
 
@@ -75,8 +83,17 @@ class ApiError(Exception):
         self.code = code
 
 
+def _ns_get(ns: Namespace, name: str, default: Any = None) -> Any:
+    value = getattr(ns, name, default)
+    if value is argparse.SUPPRESS:
+        return default
+    return value
+
+
 def _file_meta(path: str) -> dict[str, Any]:
     file_path = Path(path)
+    if not file_path.is_file():
+        raise UsageError(f"--file not found: {path}")
     data = file_path.read_bytes()
     mime, _ = mimetypes.guess_type(path)
     return {
@@ -85,6 +102,34 @@ def _file_meta(path: str) -> dict[str, Any]:
         "mime": mime,
         "sha256": hashlib.sha256(data).hexdigest(),
     }
+
+
+def _param_name(raw: str) -> str:
+    key = raw.replace("-", "_")
+    return _FLAG_TO_PARAM.get(key, key)
+
+
+def _explicit_params(ns: Namespace, spec: ToolSpec, argv: list[str]) -> set[str]:
+    explicit: set[str] = set()
+    for token in argv:
+        if token.startswith("--") and token != "--":
+            explicit.add(_param_name(token[2:].split("=", 1)[0]))
+    if spec.positional:
+        value = _ns_get(ns, spec.positional)
+        if value is not None:
+            explicit.add(spec.positional)
+    return explicit
+
+
+def _to_jsonable(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump()
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _to_jsonable(item) for key, item in value.items()}
+    return value
 
 
 def _error(stream: TextIO, payload: dict[str, Any]) -> None:
@@ -213,45 +258,41 @@ def _merge_kwargs(ns: Namespace, spec: ToolSpec, argv: list[str]) -> dict[str, A
                 kwargs["package_name"] = pkg
             continue
         if name == "file_path":
-            file_path = getattr(ns, "file_path", None)
+            file_path = _ns_get(ns, "file_path")
             if file_path:
                 kwargs["file_path"] = file_path
             continue
-        if hasattr(ns, name):
-            value = getattr(ns, name)
-            if value is not None:
-                kwargs[name] = value
+        value = _ns_get(ns, name)
+        if value is not None:
+            kwargs[name] = value
 
-    explicit = set()
-    for token in argv:
-        if token.startswith("--") and token != "--":
-            explicit.add(token[2:].split("=", 1)[0].replace("-", "_"))
+    explicit = _explicit_params(ns, spec, argv)
 
-    body_raw = getattr(ns, "body", None)
-    if body_raw:
-        body = load_json_arg(body_raw, "body")
-        if not isinstance(body, dict):
-            raise UsageError("JSON body must be an object")
-        for key, value in body.items():
-            param = key.replace("-", "_")
-            if param in kwargs and (param in explicit or key in explicit):
-                flag_val = kwargs[param]
-                if flag_val != value:
-                    raise UsageError(f"--{key} conflicts with --body")
-            kwargs[param] = value
-
-    query_raw = getattr(ns, "query", None)
-    if query_raw:
-        query = load_json_arg(query_raw, "query")
-        if not isinstance(query, dict):
-            raise UsageError("JSON query must be an object")
-        for key, value in query.items():
-            param = key.replace("-", "_")
+    def _apply_object(raw: Any, label: str, *, override: bool) -> None:
+        parsed = load_json_arg(raw, label)
+        if not isinstance(parsed, dict):
+            raise UsageError(f"JSON {label} must be an object")
+        for key, value in parsed.items():
+            param = _param_name(str(key))
             if param in kwargs and param in explicit and kwargs[param] != value:
-                raise UsageError(f"--{key} conflicts with --query")
-            kwargs.setdefault(param, value)
+                flag = next((flag for flag, dest in _FLAG_TO_PARAM.items() if dest == param), str(key).replace("_", "-"))
+                raise UsageError(f"--{flag} conflicts with --{label}")
+            if override:
+                kwargs[param] = value
+            else:
+                kwargs.setdefault(param, value)
 
-    # Fill required params that are still missing
+    body_raw = _ns_get(ns, "body")
+    if body_raw:
+        _apply_object(body_raw, "body", override=True)
+    query_raw = _ns_get(ns, "query")
+    if query_raw:
+        _apply_object(query_raw, "query", override=False)
+
+    unknown = [name for name in kwargs if name not in sig.parameters]
+    if unknown:
+        raise UsageError("unknown field(s): " + ", ".join(sorted(unknown)))
+
     for name, param in sig.parameters.items():
         if param.default is inspect.Parameter.empty and name not in kwargs:
             if name == "package_name":
@@ -262,10 +303,90 @@ def _merge_kwargs(ns: Namespace, spec: ToolSpec, argv: list[str]) -> dict[str, A
                 raise UsageError("--file is required")
             raise UsageError(f"missing --{name.replace('_', '-')}")
 
-    if getattr(ns, "limit", None) is not None and "max_results" in sig.parameters:
-        kwargs["max_results"] = ns.limit
+    limit = _ns_get(ns, "limit")
+    if limit is not None and "max_results" in sig.parameters and not _ns_get(ns, "all"):
+        kwargs["max_results"] = limit
 
     return kwargs
+
+
+def _check_confirm(ns: Namespace, spec: ToolSpec, kwargs: dict[str, Any]) -> None:
+    if spec.kind != "write" or spec.risk != "high":
+        return
+    confirm = _ns_get(ns, "confirm")
+    package = kwargs.get("package_name")
+    developer_id = kwargs.get("developer_id")
+    if not confirm:
+        if package:
+            raise UsageError("--confirm <package> is required for this command")
+        if developer_id:
+            raise UsageError("--confirm <developer-id> is required for this command")
+        raise UsageError("--confirm is required for this command")
+    if package:
+        if confirm != package:
+            raise UsageError("--confirm does not match --package")
+        return
+    if developer_id:
+        if confirm != developer_id:
+            raise UsageError("--confirm does not match --developer-id")
+        return
+    positional = kwargs.get(spec.positional) if spec.positional else None
+    if positional and confirm != positional:
+        raise UsageError(f"--confirm does not match {spec.positional}")
+
+
+def _supports_pagination(spec: ToolSpec) -> bool:
+    return spec.kind == "read" and spec.name in PAGEABLE_TOOLS
+
+
+def _client_call_kwargs(method: Any, kwargs: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    import inspect
+
+    merged = {**kwargs, **extra}
+    try:
+        sig = inspect.signature(method)
+    except (TypeError, ValueError):
+        return merged
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+        return merged
+    accepted = set(sig.parameters)
+    return {key: value for key, value in merged.items() if key in accepted}
+
+
+def _paginate_all(
+    client: Any,
+    spec: ToolSpec,
+    kwargs: dict[str, Any],
+    limit: int | None,
+    verbose: bool,
+    stderr: TextIO,
+) -> list[Any]:
+    method = getattr(client, spec.name)
+    items: list[Any] = []
+    start = 0
+    while True:
+        remaining = None if limit is None else max(limit - len(items), 0)
+        if remaining == 0:
+            break
+        fetch = _PAGE_SIZE if remaining is None else min(_PAGE_SIZE, remaining)
+        call_kwargs = _client_call_kwargs(
+            method, kwargs, {"max_results": fetch, "start_index": start}
+        )
+        started = time.perf_counter()
+        page = method(**call_kwargs)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        if verbose:
+            stderr.write(f"{spec.http_method} {spec.http_path} 200 {elapsed_ms}ms\n")
+        dumped = _to_jsonable(page)
+        if not isinstance(dumped, list):
+            raise UsageError("--all is not supported for this command")
+        items.extend(dumped)
+        if len(dumped) < fetch:
+            break
+        start += len(dumped)
+        if start <= 0:
+            break
+    return items[:limit] if limit is not None else items
 
 
 def _dry_run(spec: ToolSpec, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -373,8 +494,21 @@ def _raise_for_failed_result(result: Any) -> None:
     if not isinstance(result, dict) or result.get("success") is not False:
         return
     chunks = [result.get("error"), result.get("message"), result.get("detail")]
+    errors = result.get("errors")
+    if errors:
+        chunks.append(json.dumps(errors, ensure_ascii=False, default=str))
     text = " ".join(str(chunk) for chunk in chunks if chunk)
     status = _status_from_text(text)
+    if status is None and isinstance(errors, list):
+        for item in errors:
+            if isinstance(item, dict):
+                raw_status = item.get("status")
+                if isinstance(raw_status, int):
+                    status = raw_status
+                    break
+                status = _status_from_text(str(item))
+                if status is not None:
+                    break
     raise ApiError(text or "API request failed", status=status)
 
 
@@ -461,31 +595,42 @@ def main(
             raise UsageError("missing command")
         spec = SPECS[mcp_tool]
         kwargs = _merge_kwargs(ns, spec, args_list)
+        _check_confirm(ns, spec, kwargs)
+        file_path = kwargs.get("file_path")
+        if file_path and not Path(str(file_path)).is_file():
+            raise UsageError(f"--file not found: {file_path}")
 
-        if spec.kind == "write":
-            if spec.risk == "high":
-                confirm = getattr(ns, "confirm", None)
-                package = kwargs.get("package_name")
-                if not confirm:
-                    raise UsageError("--confirm <package> is required for this command")
-                if package and confirm != package:
-                    raise UsageError("--confirm does not match --package")
-                if not package and confirm != kwargs.get(spec.positional):
-                    # still require an explicit confirm value; already present
-                    pass
-            if not getattr(ns, "yes", False):
-                payload = _dry_run(spec, kwargs)
-                print_json(out, payload)
-                return 0
+        if spec.kind == "write" and not _ns_get(ns, "yes"):
+            payload = _dry_run(spec, kwargs)
+            print_json(out, payload)
+            return 0
 
-        result = _call_tool(spec, kwargs, bool(getattr(ns, "verbose", False)), err)
-        fields_raw = getattr(ns, "fields", None)
+        verbose = bool(_ns_get(ns, "verbose"))
+        want_all = bool(_ns_get(ns, "all"))
+        if want_all:
+            if not _supports_pagination(spec):
+                raise UsageError("--all is not supported for this command")
+            result = _paginate_all(
+                bound_client(), spec, kwargs, _ns_get(ns, "limit"), verbose, err
+            )
+        else:
+            result = _call_tool(spec, kwargs, verbose, err)
+        fields_raw = _ns_get(ns, "fields")
         fields = [part.strip() for part in fields_raw.split(",") if part.strip()] if fields_raw else []
         result = apply_fields(result, fields)
-        result = apply_limit(result, getattr(ns, "limit", None))
-        _format_output(out, redact(result) if False else result, getattr(ns, "format", "json") or "json")
+        if not want_all:
+            result = apply_limit(result, _ns_get(ns, "limit"))
+        _format_output(out, result, _ns_get(ns, "format", "json") or "json")
         return 0
     except (UsageError, AuthError, ApiError) as exc:
+        code, payload = _classify_exception(exc)
+        _error(err, payload)
+        return code
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword" in message or "required positional argument" in message:
+            _error(err, _usage_payload(message))
+            return 2
         code, payload = _classify_exception(exc)
         _error(err, payload)
         return code

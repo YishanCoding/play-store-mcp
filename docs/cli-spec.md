@@ -47,7 +47,7 @@ gpcli smoke --output <path>    # 只读线上验收（统一约定 §6）
 
 1. 所有写工具（约 38 个，判据：会改线上状态或产生资金/用户影响）默认 dry-run，打印将发的请求，不发网络写请求。
 2. `--yes` 才执行。写请求永不自动重试；读请求 429/5xx 退避重试。
-3. 以下高风险命令（按 MCP 工具名列出，对应规范命令同样适用）还必须 `--confirm <package_name>` 且与 `--package` 一致，否则退出码 2：发版/轨道类（deploy、batch-deploy、promote-release、halt-release、update-rollout、deploy-app-multilang）、资金/订阅类（refund-order、cancel-subscription-v2、revoke-subscription-v2、defer-subscription、consume/acknowledge-product-purchase）、删除类（所有 delete-*）、权限类（create/update/delete-user、create/update/delete-grant）、reply-to-review。
+3. 以下高风险命令（按 MCP 工具名列出，对应规范命令同样适用）还必须 `--confirm` 且与目标一致，否则退出码 2：发版/轨道类（deploy、batch-deploy、promote-release、halt-release、update-rollout、deploy-app-multilang）、资金/订阅类（refund-order、cancel-subscription-v2、revoke-subscription-v2、defer-subscription、consume/acknowledge-product-purchase）、删除类（所有 delete-*）、权限类（create/update/delete-user、create/update/delete-grant）、reply-to-review。有 `--package` / `package_name` 时 `--confirm` 必须等于包名；`create_user` / `update_user` / `delete_user` 没有包名，`--confirm` 必须等于 `--developer-id`。
 
 ### 不由 CLI 覆盖的能力（写进 `tools --json`，`command: null`，不要去实现浏览器自动化）
 

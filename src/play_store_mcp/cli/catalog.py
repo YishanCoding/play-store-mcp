@@ -38,6 +38,10 @@ HIGH_RISK_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# CLI --all only: these PlayStoreClient methods accept start_index.
+# Do not add start_index to the MCP tool functions (schema must stay unchanged).
+PAGEABLE_TOOLS: frozenset[str] = frozenset({"get_reviews"})
+
 WRITE_TOOLS: frozenset[str] = HIGH_RISK_TOOLS | frozenset(
     {
         "update_listing",

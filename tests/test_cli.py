@@ -352,3 +352,328 @@ def test_tools_json_includes_browser_capabilities() -> None:
         "自定义商店页（CSL）上传图片",
     }
     assert len(BROWSER_CAPABILITIES) == 3
+
+
+def _review_item(review_id: str) -> MagicMock:
+    item = MagicMock()
+    item.model_dump.return_value = {
+        "review_id": review_id,
+        "comment": "hello",
+        "author_name": "x",
+        "star_rating": 5,
+    }
+    return item
+
+
+@pytest.mark.parametrize("package_before", [True, False])
+def test_f01_package_flag_both_positions(package_before: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPCLI_PACKAGE", "com.b")
+    client = MagicMock()
+    pkg_flags = ["--package", "com.a"]
+    cmd = ["listing", "update", "--language", "en-US", "--title", "T"]
+    argv = [*pkg_flags, *cmd] if package_before else [*cmd, *pkg_flags]
+    code, out, err = _run(argv, client=client, monkeypatch=monkeypatch)
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["dry_run"] is True
+    assert "/applications/com.a/" in payload["path"]
+    assert "com.b" not in payload["path"]
+    assert client.mock_calls == []
+
+
+@pytest.mark.parametrize("yes_before", [True, False])
+def test_f01_yes_flag_both_positions(yes_before: bool) -> None:
+    client = MagicMock()
+    client.reply_to_review.return_value = ReviewReplyResult(
+        success=True, review_id="rev-1", message="ok"
+    )
+    yes_flags = ["--yes", "--confirm", "com.example.app"]
+    cmd = [
+        "review",
+        "reply",
+        "rev-1",
+        "--package",
+        "com.example.app",
+        "--reply-text",
+        "Thanks",
+    ]
+    argv = [*yes_flags, *cmd] if yes_before else [*cmd, *yes_flags]
+    code, out, err = _run(argv, client=client)
+    assert code == 0, err
+    client.reply_to_review.assert_called_once()
+    kwargs = client.reply_to_review.call_args.kwargs
+    assert kwargs["package_name"] == "com.example.app"
+    assert kwargs["review_id"] == "rev-1"
+
+
+@pytest.mark.parametrize("limit_before", [True, False])
+def test_f01_limit_flag_both_positions(limit_before: bool) -> None:
+    client = MagicMock()
+    client.get_reviews.return_value = [_review_item(f"r{i}") for i in range(5)]
+    limit_flags = ["--limit", "2"]
+    cmd = ["review", "list", "--package", "com.example.app"]
+    argv = [*limit_flags, *cmd] if limit_before else [*cmd, *limit_flags]
+    code, out, err = _run(argv, client=client)
+    assert code == 0, err
+    payload = json.loads(out)
+    assert len(payload) == 2
+    assert client.get_reviews.call_args.kwargs["max_results"] == 2
+
+
+@pytest.mark.parametrize("fields_before", [True, False])
+def test_f01_fields_flag_both_positions(fields_before: bool) -> None:
+    client = MagicMock()
+    client.get_reviews.return_value = [_review_item("r1")]
+    field_flags = ["--fields", "reviewId,comments"]
+    cmd = ["review", "list", "--package", "com.example.app"]
+    argv = [*field_flags, *cmd] if fields_before else [*cmd, *field_flags]
+    code, out, err = _run(argv, client=client)
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload[0].keys() == {"reviewId", "comments"}
+
+
+def test_f02_user_confirm_mismatch_exit_2_no_request() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "user",
+            "delete",
+            "a@b.c",
+            "--developer-id",
+            "1",
+            "--confirm",
+            "anything",
+            "--yes",
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    assert "developer-id" in payload["error"]["message"]
+    client.delete_user.assert_not_called()
+    assert client.mock_calls == []
+
+
+def test_f02_user_confirm_matches_developer_id() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        ["user", "delete", "a@b.c", "--developer-id", "1", "--confirm", "1"],
+        client=client,
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["dry_run"] is True
+    client.delete_user.assert_not_called()
+
+
+def test_f03_body_package_name_conflicts_with_package_flag() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "listing",
+            "update",
+            "--package",
+            "com.a",
+            "--language",
+            "en-US",
+            "--title",
+            "T",
+            "--body",
+            json.dumps({"package_name": "com.b"}),
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    client.update_listing.assert_not_called()
+    assert client.mock_calls == []
+
+
+def test_f04_body_conflicts_with_positional() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "order",
+            "refund",
+            "O1",
+            "--package",
+            "p",
+            "--confirm",
+            "p",
+            "--body",
+            json.dumps({"order_id": "O2"}),
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    client.refund_order.assert_not_called()
+    assert client.mock_calls == []
+
+
+def test_f05_all_paginates_reviews() -> None:
+    client = MagicMock()
+
+    def side_effect(**kwargs: Any) -> list[MagicMock]:
+        start = int(kwargs.get("start_index") or 0)
+        size = int(kwargs.get("max_results") or 100)
+        total = 150
+        return [_review_item(f"r{i}") for i in range(start, min(start + size, total))]
+
+    client.get_reviews.side_effect = side_effect
+    code, out, err = _run(
+        ["review", "list", "--package", "com.example.app", "--all"],
+        client=client,
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert len(payload) == 150
+    assert client.get_reviews.call_count == 2
+    first = client.get_reviews.call_args_list[0].kwargs
+    second = client.get_reviews.call_args_list[1].kwargs
+    assert first["start_index"] == 0
+    assert first["max_results"] == 100
+    assert second["start_index"] == 100
+    assert second["max_results"] == 100
+    assert first["package_name"] == "com.example.app"
+
+
+def test_f05_all_with_limit_is_cap() -> None:
+    client = MagicMock()
+
+    def side_effect(**kwargs: Any) -> list[MagicMock]:
+        start = int(kwargs.get("start_index") or 0)
+        size = int(kwargs.get("max_results") or 100)
+        return [_review_item(f"r{i}") for i in range(start, start + size)]
+
+    client.get_reviews.side_effect = side_effect
+    code, out, err = _run(
+        ["--all", "--limit", "5", "review", "list", "--package", "com.example.app"],
+        client=client,
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert len(payload) == 5
+    assert client.get_reviews.call_args.kwargs["max_results"] == 5
+    assert client.get_reviews.call_args.kwargs["start_index"] == 0
+
+
+def test_f05_all_unsupported_command_exit_2() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        ["app", "get", "--package", "com.example.app", "--all"],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    assert "--all" in payload["error"]["message"]
+    client.get_app_details.assert_not_called()
+    assert client.mock_calls == []
+
+
+def test_pageable_tools_match_client_start_index() -> None:
+    import inspect
+
+    from play_store_mcp.cli.catalog import PAGEABLE_TOOLS
+    from play_store_mcp.client import PlayStoreClient
+
+    found: set[str] = set()
+    for name in SPECS:
+        method = getattr(PlayStoreClient, name, None)
+        if method is None:
+            continue
+        try:
+            sig = inspect.signature(method)
+        except (TypeError, ValueError):
+            continue
+        if "start_index" in sig.parameters:
+            found.add(name)
+    assert found == set(PAGEABLE_TOOLS)
+
+
+def test_unknown_body_key_exit_2() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "listing",
+            "update",
+            "--package",
+            "com.a",
+            "--language",
+            "en-US",
+            "--title",
+            "T",
+            "--body",
+            json.dumps({"not_a_param": 1}),
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    assert client.mock_calls == []
+
+
+def test_missing_file_dry_run_exit_2() -> None:
+    client = MagicMock()
+    code, out, err = _run(
+        [
+            "app",
+            "deploy",
+            "--package",
+            "com.a",
+            "--track",
+            "internal",
+            "--file",
+            "/no/such/file.aab",
+            "--confirm",
+            "com.a",
+        ],
+        client=client,
+    )
+    assert code == 2, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "usage"
+    assert client.mock_calls == []
+
+
+def test_batch_update_listings_errors_include_http_status() -> None:
+    client = MagicMock()
+    result = MagicMock()
+    result.model_dump.return_value = {
+        "success": False,
+        "message": "Failed to batch update listings; edit was deleted.",
+        "errors": [
+            {
+                "message": (
+                    '<HttpError 403 when requesting https://androidpublisher.googleapis.com/ '
+                    'returned "Forbidden">'
+                ),
+                "status": 403,
+            }
+        ],
+    }
+    client.batch_update_listings.return_value = result
+    code, out, err = _run(
+        [
+            "listing",
+            "batch-update",
+            "--package",
+            "com.a",
+            "--yes",
+            "--updates",
+            json.dumps([{"language": "en-US", "title": "Hello"}]),
+        ],
+        client=client,
+    )
+    assert code == 3, err
+    payload = json.loads(err)
+    assert payload["error"]["type"] == "api"
+    assert payload["error"]["status"] == 403
+    assert "HttpError 403" in payload["error"]["detail"]
+    client.batch_update_listings.assert_called_once()

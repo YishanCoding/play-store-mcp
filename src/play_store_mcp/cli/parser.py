@@ -130,20 +130,42 @@ def tool_function(name: str) -> Callable[..., Any]:
     return fn
 
 
+def _add_global_flags(parser: argparse.ArgumentParser, *, with_defaults: bool) -> None:
+    """Shared flags. Defaults live only on the top-level parser.
+
+    Subparsers must use default=SUPPRESS so a flag given *before* the
+    subcommand is not overwritten by the child parser's default.
+    """
+    default: dict[str, Any] = {} if with_defaults else {"default": argparse.SUPPRESS}
+    format_default = {"default": "json"} if with_defaults else {"default": argparse.SUPPRESS}
+    parser.add_argument("--format", choices=["json", "table", "ndjson"], **format_default)
+    parser.add_argument("--fields", help="comma-separated field paths", **default)
+    parser.add_argument("--limit", type=int, **default)
+    parser.add_argument("--all", action="store_true", **default)
+    parser.add_argument("--yes", action="store_true", help="execute write commands", **default)
+    parser.add_argument("--verbose", action="store_true", **default)
+    parser.add_argument("--package", help="app package name (or GPCLI_PACKAGE)", **default)
+    parser.add_argument("--body", help="JSON object or @file.json", **default)
+    parser.add_argument("--query", help="JSON object or @file.json", **default)
+    parser.add_argument("--file", dest="file_path", help="local file path", **default)
+    parser.add_argument(
+        "--confirm",
+        help="confirmation token: package name, or --developer-id when the command has no package",
+        **default,
+    )
+    parser.add_argument("--profile", help="reserved; not implemented", **default)
+
+
 def global_parent() -> argparse.ArgumentParser:
     parent = CliParser(add_help=False)
-    parent.add_argument("--format", choices=["json", "table", "ndjson"], default="json")
-    parent.add_argument("--fields", help="comma-separated field paths")
-    parent.add_argument("--limit", type=int)
-    parent.add_argument("--all", action="store_true")
-    parent.add_argument("--yes", action="store_true", help="execute write commands")
-    parent.add_argument("--verbose", action="store_true")
-    parent.add_argument("--package", help="app package name (or GPCLI_PACKAGE)")
-    parent.add_argument("--body", help="JSON object or @file.json")
-    parent.add_argument("--query", help="JSON object or @file.json")
-    parent.add_argument("--file", dest="file_path", help="local file path")
-    parent.add_argument("--confirm", help="package name confirmation for high-risk writes")
-    parent.add_argument("--profile", help="reserved; not implemented")
+    _add_global_flags(parent, with_defaults=True)
+    return parent
+
+
+def subcommand_parent() -> argparse.ArgumentParser:
+    """Parent for resource/verb/alias parsers: same flags, no defaults."""
+    parent = CliParser(add_help=False)
+    _add_global_flags(parent, with_defaults=False)
     return parent
 
 
@@ -186,6 +208,7 @@ def _add_tool_flags(parser: argparse.ArgumentParser, spec: ToolSpec) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the gpcli parser from inspect.signature of each tool function."""
     parent = global_parent()
+    child = subcommand_parent()
     parser = CliParser(
         prog="gpcli",
         description="Google Play Console CLI",
@@ -193,34 +216,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cli_command")
 
-    tools_p = sub.add_parser("tools", parents=[parent], help="list commands as JSON")
+    tools_p = sub.add_parser("tools", parents=[child], help="list commands as JSON")
     tools_p.add_argument("--json", action="store_true", default=True)
     tools_p.set_defaults(mcp_tool=None, handler="tools")
 
-    auth_p = sub.add_parser("auth", parents=[parent], help="credential helpers")
+    auth_p = sub.add_parser("auth", parents=[child], help="credential helpers")
     auth_sub = auth_p.add_subparsers(dest="verb")
-    check_p = auth_sub.add_parser("check", parents=[parent], help="validate credentials")
+    check_p = auth_sub.add_parser("check", parents=[child], help="validate credentials")
     check_p.set_defaults(mcp_tool=None, handler="auth_check", resource="auth", verb="check")
 
-    smoke_p = sub.add_parser("smoke", parents=[parent], help="read-only live acceptance")
+    smoke_p = sub.add_parser("smoke", parents=[child], help="read-only live acceptance")
     smoke_p.add_argument("--output", required=True, help="JSON report path")
     smoke_p.set_defaults(mcp_tool=None, handler="smoke")
 
     grouped: dict[str, argparse._SubParsersAction[argparse.ArgumentParser]] = {}
     for spec in SPECS.values():
         if spec.resource not in grouped:
-            resource_parser = sub.add_parser(spec.resource, parents=[parent], help=spec.resource)
+            resource_parser = sub.add_parser(spec.resource, parents=[child], help=spec.resource)
             grouped[spec.resource] = resource_parser.add_subparsers(dest="verb")
         verb_parser = grouped[spec.resource].add_parser(
             spec.verb,
-            parents=[parent],
+            parents=[child],
             help=tool_function(spec.name).__doc__.split("\n", 1)[0] if tool_function(spec.name).__doc__ else spec.name,
         )
         _add_tool_flags(verb_parser, spec)
 
         alias_parser = sub.add_parser(
             spec.alias,
-            parents=[parent],
+            parents=[child],
             help=f"alias of {spec.command}",
         )
         _add_tool_flags(alias_parser, spec)
@@ -244,5 +267,7 @@ def load_json_arg(value: str, label: str) -> Any:
 
 
 def default_package(ns: argparse.Namespace) -> str | None:
-    pkg = getattr(ns, "package", None) or os.environ.get("GPCLI_PACKAGE")
-    return pkg
+    pkg = getattr(ns, "package", None)
+    if pkg is None or pkg is argparse.SUPPRESS:
+        pkg = os.environ.get("GPCLI_PACKAGE")
+    return pkg or None
