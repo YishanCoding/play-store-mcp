@@ -1674,6 +1674,29 @@ class TestExperimentReport:
                 experiment_id=self.EXP,
             )
 
+    @pytest.mark.parametrize(
+        "damaged_media",
+        [
+            _proto_bytes(6, b"\x80"),
+            _proto_bytes(6, _proto_bytes(1, b"\x80")),
+        ],
+        ids=["asset-list", "asset"],
+    )
+    def test_truncated_nested_treatment_media_raises(self, damaged_media: bytes) -> None:
+        old = _proto_bytes(
+            5,
+            _proto_str(1, "Variant B")
+            + _proto_bytes(6, _proto_bytes(1, _proto_str(2, "https://example.com/fixture-screenshot.png"))),
+        )
+        payload = self._payload()
+        assert old in payload
+        damaged = _proto_bytes(5, _proto_str(1, "Variant B") + damaged_media)
+        with pytest.raises(PlayStoreClientError, match="treatment 内有无法解码的子消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload.replace(old, damaged)),
+                experiment_id=self.EXP,
+            )
+
     def _metadata(self) -> bytes:
         return (
             _proto_bytes(1, self._reference())

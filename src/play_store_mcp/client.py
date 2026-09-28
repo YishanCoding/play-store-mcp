@@ -97,6 +97,12 @@ INITIAL_BACKOFF = 1.0  # seconds
 MAX_BACKOFF = 32.0  # seconds
 
 
+class _ProtoRawChunk(bytes):
+    """Length-delimited protobuf value that was neither printable text nor a
+    decodable message. Parsers that know a subtree holds only messages and
+    strings treat it as a damaged payload."""
+
+
 class PlayStoreClientError(Exception):
     """Base exception for Play Store client errors.
 
@@ -4464,7 +4470,7 @@ class PlayStoreClient:
                     try:
                         val = cls._decode_protobuf_generic(chunk) if chunk else {}
                     except PlayStoreClientError:
-                        val = chunk
+                        val = _ProtoRawChunk(chunk)
             elif wire_type in (1, 5):
                 need = 8 if wire_type == 1 else 4
                 if pos + need > len(buf):
@@ -5056,6 +5062,19 @@ class PlayStoreClient:
         return image_urls, unique_texts[:50]
 
     @classmethod
+    def _has_raw_chunk(cls, value: Any) -> bool:
+        if isinstance(value, _ProtoRawChunk):
+            return True
+        if isinstance(value, dict):
+            return any(
+                cls._has_raw_chunk(item)
+                for items in value.values()
+                if isinstance(items, list)
+                for item in items
+            )
+        return False
+
+    @classmethod
     def parse_experiment_report_startup(
         cls,
         response: dict[str, Any],
@@ -5093,6 +5112,12 @@ class PlayStoreClient:
             if not isinstance(treatment, dict):
                 raise PlayStoreClientError(
                     f"实验报告第 {index} 个 treatment 不是消息。拒绝返回残缺报告。"
+                )
+            # Real treatments hold only strings, ints and nested messages.
+            # Any undecodable chunk below means a damaged asset message.
+            if cls._has_raw_chunk(treatment):
+                raise PlayStoreClientError(
+                    f"实验报告第 {index} 个 treatment 内有无法解码的子消息。拒绝返回残缺报告。"
                 )
         metadata = cls._proto_field(decoded, 4)
         result = cls._proto_field(decoded, 2)
