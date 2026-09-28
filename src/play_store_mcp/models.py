@@ -581,7 +581,14 @@ class CustomStoreListingSummary(BaseModel):
     edit_url: str = Field(..., description="Full Console URL to edit this CSL")
     status: str | None = Field(
         None,
-        description="Console status label. 'live' is field 5 == 1, confirmed on the edit page",
+        description=(
+            "Console status label. 'live' is overview field 5 == 1. "
+            "Checked 2026-09-28 on "
+            "https://play.google.com/console/u/0/developers/6287361731679611511/app/4973755093875388037/store-listings/4832841715885421717 "
+            "(grim-reaper, listing_id 4832841715885421717): page title 'Store listing details', status line 'Live'. "
+            "The store listings table the same day showed 'Live' on every custom-listing row, and the overview "
+            "response for those rows was field 5 == 1. Other integers are not labeled."
+        ),
     )
     status_code: int | None = Field(None, description="Raw status enum from the overview payload")
     targeting_type: str | None = Field(
@@ -614,9 +621,32 @@ class StoreListingExperimentSummary(BaseModel):
     name: str = Field(..., description="Experiment display name (often encodes what's being tested)")
     locale: str = Field("", description="Locale the experiment is scoped to")
     dimension_type: int | None = Field(None, description="Asset-type enum from overview field 4; not an official schema name")
-    status: int | None = Field(None, description="Status enum from overview field 3. The experiments UI route currently redirects, so this integer is not mapped to a label")
-    start_timestamp: str | None = Field(None, description="Start time (ISO) from overview field 7, a protobuf Timestamp")
-    end_timestamp: str | None = Field(None, description="Later timestamp (ISO) from overview field 18. The experiments page redirects, so this was not confirmed against the UI label")
+    status_code: int | None = Field(
+        None,
+        description=(
+            "Raw status integer from overview field 3. "
+            "On 2026-09-28 the only overview row (JJB-100-Android-71-position, id 9063393730453672176) had field 3 == 1, "
+            "and its details page "
+            "https://play.google.com/console/u/0/developers/6287361731679611511/app/4973755093875388037/store-listings/0/experiments/9063393730453672176/details "
+            "showed the status line 'Running'. No other code appeared in that response, so this stays the raw integer."
+        ),
+    )
+    start_timestamp: str | None = Field(
+        None,
+        description=(
+            "Start time (ISO) from overview field 7, a protobuf Timestamp. "
+            "The same details page showed 'Started on Sep 22, 2026', which is the UTC date of field 7 "
+            "(2026-09-22T03:34:15Z on that response)."
+        ),
+    )
+    overview_field_18_timestamp: str | None = Field(
+        None,
+        description=(
+            "ISO time from overview field 18. Not an experiment end time. "
+            "The details page above showed status 'Running' and 'Started on Sep 22, 2026' and no end time. "
+            "On that response field 18 was 2026-09-22T03:56:31Z, about 22 minutes after field 7, with no matching UI label."
+        ),
+    )
     traffic_split: float | None = Field(None, description="Variant traffic fraction from overview field 10 (fixed64 double)")
 
 

@@ -96,7 +96,15 @@ MAX_BACKOFF = 32.0  # seconds
 
 
 class PlayStoreClientError(Exception):
-    """Base exception for Play Store client errors."""
+    """Base exception for Play Store client errors.
+
+    ``status`` is the HTTP status when the failure came from an HTTP response.
+    Callers that only pass a message keep ``status is None``.
+    """
+
+    def __init__(self, *args: Any, status: int | None = None) -> None:
+        super().__init__(*args)
+        self.status = status
 
 
 def retry_with_backoff(func):  # type: ignore[no-untyped-def]
@@ -4396,13 +4404,16 @@ class PlayStoreClient:
         result = 0
         shift = 0
         while True:
+            if pos >= len(buf) or shift >= 64:
+                raise PlayStoreClientError(
+                    "protobuf varint 被截断。拒绝返回不完整的解析结果。"
+                )
             b = buf[pos]
             result |= (b & 0x7F) << shift
             pos += 1
             if not (b & 0x80):
-                break
+                return result, pos
             shift += 7
-        return result, pos
 
     @classmethod
     def _decode_protobuf_generic(cls, buf: bytes) -> dict[int, list[Any]]:
@@ -4412,6 +4423,12 @@ class PlayStoreClient:
         occurrences in order). Length-delimited fields are returned as a
         decoded UTF-8 string if printable, else recursively decoded as a
         nested message if that succeeds, else raw bytes.
+
+        Unknown wire types, field number 0, truncated varints, and
+        length/fixed fields that run past the buffer raise
+        PlayStoreClientError. A length-delimited chunk that is not a message
+        still falls back to raw bytes; that fallback does not apply to the
+        buffer this method was asked to decode.
         """
         fields: dict[int, list[Any]] = {}
         pos = 0
@@ -4419,10 +4436,19 @@ class PlayStoreClient:
             tag, pos = cls._decode_varint(buf, pos)
             field_num = tag >> 3
             wire_type = tag & 0x7
+            if field_num == 0:
+                raise PlayStoreClientError(
+                    "protobuf 字段号为 0。拒绝返回不完整的解析结果。"
+                )
             if wire_type == 0:
                 val, pos = cls._decode_varint(buf, pos)
             elif wire_type == 2:
                 length, pos = cls._decode_varint(buf, pos)
+                if length < 0 or pos + length > len(buf):
+                    raise PlayStoreClientError(
+                        f"protobuf 字段 {field_num} 的长度 {length} 超出剩余字节。"
+                        "拒绝返回不完整的解析结果。"
+                    )
                 chunk = buf[pos:pos + length]
                 pos += length
                 val = None
@@ -4435,16 +4461,22 @@ class PlayStoreClient:
                 if val is None:
                     try:
                         val = cls._decode_protobuf_generic(chunk) if chunk else {}
-                    except Exception:
+                    except PlayStoreClientError:
                         val = chunk
-            elif wire_type == 1:
-                val = buf[pos:pos + 8]
-                pos += 8
-            elif wire_type == 5:
-                val = buf[pos:pos + 4]
-                pos += 4
+            elif wire_type in (1, 5):
+                need = 8 if wire_type == 1 else 4
+                if pos + need > len(buf):
+                    raise PlayStoreClientError(
+                        f"protobuf 字段 {field_num} 的 fixed{need * 8} 剩余字节不足。"
+                        "拒绝返回不完整的解析结果。"
+                    )
+                val = buf[pos:pos + need]
+                pos += need
             else:
-                break
+                raise PlayStoreClientError(
+                    f"protobuf 出现非法 wire type {wire_type}（字段 {field_num}）。"
+                    "拒绝返回不完整的解析结果。"
+                )
             fields.setdefault(field_num, []).append(val)
         return fields
 
@@ -4552,11 +4584,30 @@ class PlayStoreClient:
         try:
             raw = base64.b64decode(payload_b64, validate=True)
             decoded = cls._decode_protobuf_generic(raw)
+        except PlayStoreClientError:
+            raise
         except Exception as exc:
             raise PlayStoreClientError(f"{what} protobuf 无法解码。拒绝返回空列表。") from exc
         if not isinstance(decoded, dict):
             raise PlayStoreClientError(f"{what} protobuf 解码结果不是消息。拒绝返回空列表。")
         return decoded
+
+    @staticmethod
+    def _parse_startup_rpc_envelope(raw: str, rpc_name: str) -> dict[str, Any]:
+        try:
+            envelope = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PlayStoreClientError(
+                f"Play Console RPC {rpc_name} 没有返回 JSON。浏览器输出：{raw[:200]}"
+            ) from exc
+        if not isinstance(envelope, dict):
+            raise PlayStoreClientError(f"Play Console RPC {rpc_name} 返回了非对象 JSON。")
+        return envelope
+
+    @staticmethod
+    def _console_tab_needs_navigation(envelope: dict[str, Any]) -> bool:
+        error = envelope.get("error")
+        return isinstance(error, str) and "不在 Play Console" in error
 
     def _play_console_startup_rpc(self, url: str, developer_id: str, app_id: str) -> dict[str, Any]:
         """POST one read-only Play Console startupData RPC from the logged-in page."""
@@ -4588,14 +4639,16 @@ class PlayStoreClient:
 }})()
 """
         raw = self._run_browser_js(js, timeout=45)
-        try:
-            envelope = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise PlayStoreClientError(
-                f"Play Console RPC {rpc_name} 没有返回 JSON。浏览器输出：{raw[:200]}"
-            ) from exc
-        if not isinstance(envelope, dict):
-            raise PlayStoreClientError(f"Play Console RPC {rpc_name} 返回了非对象 JSON。")
+        envelope = self._parse_startup_rpc_envelope(raw, rpc_name)
+        if self._console_tab_needs_navigation(envelope):
+            app_list = (
+                "https://play.google.com/console/u/0/developers/"
+                f"{developer_id}/app-list"
+            )
+            self._run_opencli_cli(["open", app_list], timeout=45)
+            time.sleep(4)
+            raw = self._run_browser_js(js, timeout=45)
+            envelope = self._parse_startup_rpc_envelope(raw, rpc_name)
         if envelope.get("error"):
             href = envelope.get("href")
             extra = f"（当前页面 {href}）" if href else ""
@@ -4604,9 +4657,11 @@ class PlayStoreClient:
         response_text = envelope.get("body")
         if status != 200 or not isinstance(response_text, str):
             detail = response_text if isinstance(response_text, str) else ""
+            http_status = status if isinstance(status, int) and not isinstance(status, bool) else None
             raise PlayStoreClientError(
                 f"Play Console RPC {rpc_name} 失败，HTTP {status}，app-id {app_id}。"
-                f"{detail[:300]} 这不是空列表。"
+                f"{detail[:300]} 这不是空列表。",
+                status=http_status,
             )
         try:
             parsed = json.loads(response_text)
@@ -4732,9 +4787,9 @@ class PlayStoreClient:
             name=name,
             locale=locale,
             dimension_type=dimension if isinstance(dimension, int) else None,
-            status=status if isinstance(status, int) else None,
+            status_code=status if isinstance(status, int) else None,
             start_timestamp=cls._proto_timestamp(cls._proto_field(exp_msg, 7)),
-            end_timestamp=cls._proto_timestamp(cls._proto_field(exp_msg, 18)),
+            overview_field_18_timestamp=cls._proto_timestamp(cls._proto_field(exp_msg, 18)),
             traffic_split=cls._proto_double(cls._proto_field(exp_msg, 10)),
         )
 

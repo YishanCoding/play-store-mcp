@@ -84,10 +84,10 @@ class TestStoreListingExperiments:
         assert experiment.experiment_id == "5612448453188703735"
         assert experiment.name == "TRPG-phone-A1A7-vs-30off"
         assert experiment.locale == "en-US"
-        assert experiment.status == 1
+        assert experiment.status_code == 1
         assert experiment.dimension_type == 2
         assert experiment.start_timestamp == "2026-06-11T06:13:53+00:00"
-        assert experiment.end_timestamp is None
+        assert experiment.overview_field_18_timestamp is None
         assert experiment.traffic_split == 0.5
 
     def test_parse_confirmed_zero(self) -> None:
@@ -118,12 +118,37 @@ class TestStoreListingExperiments:
             {"httpStatus": 403, "body": '{"1":7,"2":"The caller does not have permission"}'}
         )
         with patch.object(client, "_run_browser_js", return_value=raw):
-            with pytest.raises(PlayStoreClientError, match="HTTP 403"):
+            with pytest.raises(PlayStoreClientError, match="HTTP 403") as raised:
                 client.get_store_listing_experiments(
                     package_name="com.example.app",
                     developer_id="123",
                     app_id="111",
                 )
+        assert raised.value.status == 403
+
+    def test_truncated_page_field_then_illegal_wire_raises(self) -> None:
+        payload = b"\x20\x01\x0e"
+        with pytest.raises(PlayStoreClientError, match="非法 wire type"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
+
+    def test_truncated_varint_raises(self) -> None:
+        payload = _proto_varint(4, 1) + b"\x80"
+        with pytest.raises(PlayStoreClientError, match="varint 被截断"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
+
+    def test_overlong_length_raises(self) -> None:
+        payload = _proto_varint(4, 1) + b"\x0a\x64\x01"
+        with pytest.raises(PlayStoreClientError, match="超出剩余字节"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
 
     def test_logged_out_browser_raises(self, client: PlayStoreClient) -> None:
         raw = json.dumps({"error": "OpenCLI 浏览器未登录 Play Console"})
@@ -201,14 +226,74 @@ class TestCustomStoreListings:
             )
 
     def test_empty_message_is_not_confirmed_zero(self) -> None:
-        # A non-empty blob that the wire walker cannot turn into page fields.
-        with pytest.raises(PlayStoreClientError, match="无法确认数量为 0"):
+        # A one-byte tag with an illegal wire type must not decode as zero listings.
+        with pytest.raises(PlayStoreClientError, match="非法 wire type"):
             PlayStoreClient.parse_custom_store_listings_startup(
                 _startup_envelope(self.TYPE_URL, b"\x0f"),
                 package_name="com.example.app",
                 developer_id=self.DEV,
                 app_id=self.APP,
             )
+
+    def test_illegal_wire_after_page_field_raises(self) -> None:
+        payload = b"\x30\x01\x0e"
+        with pytest.raises(PlayStoreClientError, match="非法 wire type"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_truncated_varint_raises(self) -> None:
+        payload = _proto_varint(6, 1) + b"\x80"
+        with pytest.raises(PlayStoreClientError, match="varint 被截断"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_overlong_length_raises(self) -> None:
+        payload = _proto_varint(6, 1) + b"\x0a\x64\x01"
+        with pytest.raises(PlayStoreClientError, match="超出剩余字节"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_short_fixed64_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="剩余字节不足"):
+            PlayStoreClient._decode_protobuf_generic(b"\x09\x01\x02")
+
+    def test_field_zero_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="字段号为 0"):
+            PlayStoreClient._decode_protobuf_generic(b"\x00\x01")
+
+    def test_opens_play_console_when_tab_is_elsewhere(self, client: PlayStoreClient) -> None:
+        mismatch = json.dumps(
+            {"error": "OpenCLI 浏览器不在 Play Console 页面", "href": "https://example.com/"}
+        )
+        logged_out = json.dumps({"error": "OpenCLI 浏览器未登录 Play Console"})
+        with (
+            patch.object(client, "_run_browser_js", side_effect=[mismatch, logged_out]) as js,
+            patch.object(client, "_run_opencli_cli", return_value="") as cli,
+            patch("play_store_mcp.client.time.sleep"),
+        ):
+            with pytest.raises(PlayStoreClientError, match="未登录 Play Console"):
+                client.get_custom_store_listings(
+                    package_name="com.example.app",
+                    developer_id=self.DEV,
+                    app_id=self.APP,
+                )
+        cli.assert_called_once_with(
+            ["open", "https://play.google.com/console/u/0/developers/100/app-list"],
+            timeout=45,
+        )
+        assert js.call_count == 2
 
 
 class TestGetReleases:

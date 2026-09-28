@@ -66,7 +66,7 @@ gpcli store-listing-experiment list --package com.vast.jujubit --developer-id DE
 gpcli experiment-report get EXPERIMENT --package com.vast.jujubit --developer-id DEV --app-id APP
 ```
 
-`custom-store-listing list` 和 `store-listing-experiment list` 不是 Android Publisher API。它们在已登录的 OpenCLI Play Console 页面里调用只读内部 RPC（`storelistings/custom/overview:startupData` 和 `storelistingexperiments/overview:startupData`）。未登录、id 不对、或返回结构和已知页面信封对不上时，输出 `{"error": ...}` 并且退出码非 0。空列表只表示该 RPC 明确返回了 0 条。
+`custom-store-listing list` 和 `store-listing-experiment list` 不是 Android Publisher API。它们在已登录的 OpenCLI Play Console 页面里调用只读内部 RPC（`storelistings/custom/overview:startupData` 和 `storelistingexperiments/overview:startupData`）。当前标签页不在 `play.google.com` 时，会先打开该开发者的应用列表再发一次请求。未登录、id 不对、protobuf 残缺，或返回结构和已知页面信封对不上时，输出 `{"error": ...}` 并且退出码非 0。空列表只表示该 RPC 明确返回了 0 条。实验条目里的 `status_code` 是 overview 字段 3 的原始整数（已看到的 `1` 在详情页对应 “Running”，不另做枚举名）；`start_timestamp` 是字段 7；`overview_field_18_timestamp` 是字段 18，不是结束时间。CSL 的 `status` 为 `live` 只对应 overview 字段 5 等于 1（详情页文案 “Live”）。
 
 健康度与获客：
 

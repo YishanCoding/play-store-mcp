@@ -1609,8 +1609,10 @@ def get_store_listing_experiments(
     REQUIREMENT: OpenCLI must be installed and the automation browser must be
     logged into Play Console (play.google.com/console).
 
-    status is the raw overview enum (the experiments page redirect means it is
-    not mapped to a UI label). end_timestamp is overview field 18.
+    status_code is the raw overview field 3. The one live row's details page
+    showed "Running" for code 1; other codes are not labeled. start_timestamp
+    is field 7 ("Started on Sep 22, 2026" on that page). overview_field_18_timestamp
+    is field 18 and is not an end time: that page had no end time.
 
     Find developer_id and app_id in the Play Console URL:
     https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listing-experiments/overview
@@ -1621,8 +1623,9 @@ def get_store_listing_experiments(
         app_id: Numeric app ID from Play Console URL
 
     Returns:
-        experiments: List of experiments with experiment_id, name, locale, and
-                     best-effort dimension_type/status/start_timestamp/traffic_split
+        experiments: List of experiments with experiment_id, name, locale,
+                     status_code, start_timestamp, overview_field_18_timestamp,
+                     and best-effort dimension_type/traffic_split
     """
     client = get_client()
     result = client.get_store_listing_experiments(

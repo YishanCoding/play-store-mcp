@@ -303,6 +303,24 @@ def test_swallowed_write_failure_exit_3() -> None:
     client.reply_to_review.assert_called_once()
 
 
+def test_play_console_rpc_error_keeps_http_status() -> None:
+    from play_store_mcp.cli import _api_payload, _classify_exception
+    from play_store_mcp.client import PlayStoreClientError
+
+    exc = PlayStoreClientError(
+        "Play Console RPC failed, HTTP 403, app-id 111",
+        status=403,
+    )
+    payload = _api_payload(exc)
+    assert payload["error"]["status"] == 403
+    assert payload["error"]["type"] == "api"
+    code, classified = _classify_exception(exc)
+    assert code == 3
+    assert classified["error"]["status"] == 403
+    bare = _api_payload(PlayStoreClientError("no http status"))
+    assert bare["error"]["status"] is None
+
+
 def test_api_httperror_exit_3() -> None:
     client = MagicMock()
     resp = MagicMock()
