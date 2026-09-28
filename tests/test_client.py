@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
@@ -273,27 +274,160 @@ class TestCustomStoreListings:
         with pytest.raises(PlayStoreClientError, match="字段号为 0"):
             PlayStoreClient._decode_protobuf_generic(b"\x00\x01")
 
-    def test_opens_play_console_when_tab_is_elsewhere(self, client: PlayStoreClient) -> None:
-        mismatch = json.dumps(
+    def _confirmed_zero_rpc(self) -> str:
+        body = json.dumps(_startup_envelope(self.TYPE_URL, _proto_varint(6, 1)))
+        return json.dumps({"httpStatus": 200, "body": body})
+
+    @staticmethod
+    def _elsewhere_rpc() -> str:
+        return json.dumps(
             {"error": "OpenCLI 浏览器不在 Play Console 页面", "href": "https://example.com/"}
         )
-        logged_out = json.dumps({"error": "OpenCLI 浏览器未登录 Play Console"})
+
+    def _listing_ids_via_browser(self, client: PlayStoreClient, fake_js: Any) -> list[str]:
         with (
-            patch.object(client, "_run_browser_js", side_effect=[mismatch, logged_out]) as js,
-            patch.object(client, "_run_opencli_cli", return_value="") as cli,
+            patch.object(client, "_run_browser_js", side_effect=fake_js) as js,
+            patch.object(client, "_run_opencli_cli") as cli,
             patch("play_store_mcp.client.time.sleep"),
         ):
-            with pytest.raises(PlayStoreClientError, match="未登录 Play Console"):
-                client.get_custom_store_listings(
-                    package_name="com.example.app",
-                    developer_id=self.DEV,
-                    app_id=self.APP,
+            result = client.get_custom_store_listings(
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+        cli.assert_not_called()
+        scripts = [call.args[0] for call in js.call_args_list]
+        assert result.listings == []
+        return scripts
+
+    def test_already_on_play_console_does_not_navigate(self, client: PlayStoreClient) -> None:
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            assert "location.assign" not in js
+            assert "consoleProbe" not in js
+            return self._confirmed_zero_rpc()
+
+        scripts = self._listing_ids_via_browser(client, fake_js)
+        assert len(scripts) == 1
+        assert "location.assign" not in scripts[0]
+
+    def test_elsewhere_then_assign_and_poll_succeeds(self, client: PlayStoreClient) -> None:
+        app_list = "https://play.google.com/console/u/0/developers/100/app-list"
+        probes = {"n": 0}
+        assigned = {"ok": False}
+
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            if "location.assign" in js:
+                assert app_list in js
+                assigned["ok"] = True
+                return "ok"
+            if "consoleProbe" in js:
+                probes["n"] += 1
+                if probes["n"] == 1:
+                    return json.dumps(
+                        {
+                            "consoleProbe": 1,
+                            "href": "https://example.com/",
+                            "readyState": "complete",
+                            "hasSapisid": False,
+                        }
+                    )
+                assert assigned["ok"]
+                return json.dumps(
+                    {
+                        "consoleProbe": 1,
+                        "href": app_list,
+                        "readyState": "complete",
+                        "hasSapisid": True,
+                    }
                 )
-        cli.assert_called_once_with(
-            ["open", "https://play.google.com/console/u/0/developers/100/app-list"],
-            timeout=45,
-        )
-        assert js.call_count == 2
+            if probes["n"] == 0:
+                return self._elsewhere_rpc()
+            return self._confirmed_zero_rpc()
+
+        scripts = self._listing_ids_via_browser(client, fake_js)
+        assert assigned["ok"]
+        assert probes["n"] >= 2
+        assert any("location.assign" in script for script in scripts)
+        assert sum("consoleProbe" in script for script in scripts) == probes["n"]
+
+    def test_navigation_timeout_raises_instead_of_empty_list(self, client: PlayStoreClient) -> None:
+        clock = {"t": 0.0}
+
+        def monotonic() -> float:
+            clock["t"] += 8.0
+            return clock["t"]
+
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            if "location.assign" in js:
+                raise subprocess.TimeoutExpired(cmd="opencli", timeout=timeout)
+            if "consoleProbe" in js:
+                return json.dumps(
+                    {
+                        "consoleProbe": 1,
+                        "href": "https://example.com/",
+                        "readyState": "complete",
+                        "hasSapisid": False,
+                    }
+                )
+            return self._elsewhere_rpc()
+
+        with (
+            patch.object(client, "_run_browser_js", side_effect=fake_js),
+            patch.object(client, "_run_opencli_cli") as cli,
+            patch("play_store_mcp.client.time.sleep"),
+            patch("play_store_mcp.client.time.monotonic", monotonic),
+            pytest.raises(PlayStoreClientError, match="不在 Play Console") as raised,
+        ):
+            client.get_custom_store_listings(
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+        cli.assert_not_called()
+        message = str(raised.value)
+        assert "example.com" in message
+        assert "空列表不会当作成功" in message
+
+    def test_navigation_timeout_without_login_cookie_raises(self, client: PlayStoreClient) -> None:
+        clock = {"t": 0.0}
+        app_list = "https://play.google.com/console/u/0/developers/100/app-list"
+
+        def monotonic() -> float:
+            clock["t"] += 8.0
+            return clock["t"]
+
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            if "location.assign" in js:
+                return "ok"
+            if "consoleProbe" in js:
+                return json.dumps(
+                    {
+                        "consoleProbe": 1,
+                        "href": app_list,
+                        "readyState": "complete",
+                        "hasSapisid": False,
+                    }
+                )
+            return self._elsewhere_rpc()
+
+        with (
+            patch.object(client, "_run_browser_js", side_effect=fake_js),
+            patch.object(client, "_run_opencli_cli") as cli,
+            patch("play_store_mcp.client.time.sleep"),
+            patch("play_store_mcp.client.time.monotonic", monotonic),
+            pytest.raises(PlayStoreClientError, match="未登录 Play Console") as raised,
+        ):
+            client.get_custom_store_listings(
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+        cli.assert_not_called()
+        assert "没有 SAPISID" in str(raised.value)
 
 
 class TestGetReleases:

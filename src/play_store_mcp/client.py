@@ -4609,6 +4609,100 @@ class PlayStoreClient:
         error = envelope.get("error")
         return isinstance(error, str) and "不在 Play Console" in error
 
+    # `opencli browser open` on Play Console often never returns, even after
+    # document.readyState is already "complete", and a stuck open blocks later
+    # evals on the same session. Move the tab with location.assign instead.
+    _CONSOLE_NAV_BUDGET_S = 30.0
+    _CONSOLE_PROBE_TIMEOUT_S = 3
+    _CONSOLE_POLL_INTERVAL_S = 0.4
+    _CONSOLE_PROBE_JS = """
+(() => JSON.stringify({
+  consoleProbe: 1,
+  href: String(location.href || '').slice(0, 300),
+  readyState: String(document.readyState || ''),
+  hasSapisid: /SAPISID=([^;]+)/.test(document.cookie || '')
+}))()
+"""
+
+    @staticmethod
+    def _console_probe_ready(probe: dict[str, Any] | None) -> bool:
+        if not isinstance(probe, dict):
+            return False
+        href = probe.get("href")
+        return (
+            isinstance(href, str)
+            and href.startswith("https://play.google.com/")
+            and probe.get("readyState") == "complete"
+            and probe.get("hasSapisid") is True
+        )
+
+    def _probe_opencli_page(self) -> dict[str, Any] | None:
+        try:
+            raw = self._run_browser_js(
+                self._CONSOLE_PROBE_JS, timeout=self._CONSOLE_PROBE_TIMEOUT_S
+            )
+        except (subprocess.TimeoutExpired, PlayStoreClientError):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _assign_opencli_location(self, url: str) -> None:
+        js = f"location.assign({json.dumps(url)}); 'ok'"
+        try:
+            self._run_browser_js(js, timeout=self._CONSOLE_PROBE_TIMEOUT_S)
+        except (subprocess.TimeoutExpired, PlayStoreClientError):
+            return
+
+    def _raise_console_navigation_timeout(self, app_list_url: str, probe: dict[str, Any] | None) -> None:
+        href = ""
+        ready = ""
+        has_sapisid = None
+        if isinstance(probe, dict):
+            href_value = probe.get("href")
+            ready_value = probe.get("readyState")
+            href = href_value if isinstance(href_value, str) else ""
+            ready = ready_value if isinstance(ready_value, str) else ""
+            has_sapisid = probe.get("hasSapisid")
+        where = href or "未知"
+        ready_label = ready or "unknown"
+        on_console = href.startswith("https://play.google.com/")
+        if on_console and has_sapisid is not True:
+            raise PlayStoreClientError(
+                "OpenCLI 浏览器未登录 Play Console"
+                f"（已打开 {where}，readyState={ready_label}，没有 SAPISID）。"
+                "请在 OpenCLI default 会话登录 Play Console 后重试。空列表不会当作成功。"
+            )
+        raise PlayStoreClientError(
+            "OpenCLI 浏览器不在 Play Console"
+            f"（等待跳转到 {app_list_url} 超过 {int(self._CONSOLE_NAV_BUDGET_S)} 秒，"
+            f"当前页面 {where}，readyState={ready_label}）。"
+            "请确认 default 会话已登录且没有卡住的对话框，然后重试。空列表不会当作成功。"
+        )
+
+    def _ensure_opencli_on_play_console(self, app_list_url: str) -> None:
+        """Poll until the OpenCLI tab is a loaded, logged-in Play Console page.
+
+        Does not call ``opencli browser open``. A single eval timeout is treated
+        as "not ready yet" and the loop continues until the budget is spent.
+        """
+        deadline = time.monotonic() + self._CONSOLE_NAV_BUDGET_S
+        probe = self._probe_opencli_page()
+        if self._console_probe_ready(probe):
+            return
+        self._assign_opencli_location(app_list_url)
+        while time.monotonic() < deadline:
+            probe = self._probe_opencli_page()
+            if self._console_probe_ready(probe):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self._CONSOLE_POLL_INTERVAL_S, remaining))
+        self._raise_console_navigation_timeout(app_list_url, probe)
+
     def _play_console_startup_rpc(self, url: str, developer_id: str, app_id: str) -> dict[str, Any]:
         """POST one read-only Play Console startupData RPC from the logged-in page."""
         developer_id = self._require_console_numeric_id(developer_id, "developer-id")
@@ -4645,8 +4739,7 @@ class PlayStoreClient:
                 "https://play.google.com/console/u/0/developers/"
                 f"{developer_id}/app-list"
             )
-            self._run_opencli_cli(["open", app_list], timeout=45)
-            time.sleep(4)
+            self._ensure_opencli_on_play_console(app_list)
             raw = self._run_browser_js(js, timeout=45)
             envelope = self._parse_startup_rpc_envelope(raw, rpc_name)
         if envelope.get("error"):
