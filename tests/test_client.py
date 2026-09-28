@@ -1660,6 +1660,89 @@ class TestExperimentReport:
                 experiment_id=self.EXP,
             )
 
+    def test_truncated_treatment_raises(self) -> None:
+        old = _proto_bytes(
+            5,
+            _proto_str(1, "Variant B")
+            + _proto_bytes(6, _proto_bytes(1, _proto_str(2, "https://example.com/fixture-screenshot.png"))),
+        )
+        payload = self._payload()
+        assert old in payload
+        with pytest.raises(PlayStoreClientError, match="treatment 不是消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload.replace(old, _proto_bytes(5, b"\x80"))),
+                experiment_id=self.EXP,
+            )
+
+    def _metadata(self) -> bytes:
+        return (
+            _proto_bytes(1, self._reference())
+            + _proto_str(2, "Fixture experiment")
+            + _proto_varint(3, 1)
+            + _proto_varint(4, 2)
+            + _proto_bytes(7, _proto_varint(1, 1790048055))
+        )
+
+    def _named_result(self) -> bytes:
+        return (
+            _proto_str(1, self.EXP)
+            + _proto_bytes(3, self._variant(0.34, None))
+            + _proto_bytes(3, self._variant(0.33, "Variant B"))
+            + _proto_bytes(4, _proto_varint(1, 1790048055))
+        )
+
+    def test_truncated_result_and_metadata_raise(self) -> None:
+        treatment = _proto_str(1, "Variant B") + _proto_bytes(
+            6, _proto_bytes(1, _proto_str(2, "https://example.com/fixture-screenshot.png"))
+        )
+        tail = _proto_bytes(5, treatment) + _proto_varint(7, 1) + _proto_varint(8, 1)
+        cases = (
+            _proto_bytes(2, b"\x80") + _proto_bytes(4, self._metadata()) + tail,
+            _proto_bytes(2, self._named_result()) + _proto_bytes(4, b"\x80") + tail,
+        )
+        for damaged in cases:
+            with pytest.raises(PlayStoreClientError, match="不是消息"):
+                PlayStoreClient.parse_experiment_report_startup(
+                    _startup_envelope(self.TYPE_URL, damaged),
+                    experiment_id=self.EXP,
+                )
+
+    def test_truncated_variant_raises(self) -> None:
+        result = _proto_str(1, self.EXP) + _proto_bytes(3, b"\x80")
+        payload = _proto_bytes(2, result) + _proto_bytes(4, self._metadata())
+        with pytest.raises(PlayStoreClientError, match="变体不是消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                experiment_id=self.EXP,
+            )
+
+    def test_all_variants_unnamed_raises(self) -> None:
+        metadata = (
+            _proto_bytes(1, self._reference())
+            + _proto_str(2, "Fixture experiment")
+            + _proto_varint(3, 1)
+            + _proto_varint(4, 2)
+            + _proto_bytes(7, _proto_varint(1, 1790048055))
+        )
+        result = _proto_str(1, self.EXP) + _proto_bytes(3, self._variant(0.34, None))
+        with pytest.raises(PlayStoreClientError, match="所有变体都无名称"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, _proto_bytes(2, result) + _proto_bytes(4, metadata)),
+                experiment_id=self.EXP,
+            )
+
+    def test_audience_fraction_out_of_range_raises(self) -> None:
+        old = _proto_bytes(3, self._variant(0.34, None))
+        payload = self._payload()
+        assert old in payload
+        for fraction in (1.5, -0.1, float("nan"), float("inf")):
+            damaged = payload.replace(old, _proto_bytes(3, self._variant(fraction, None)))
+            with pytest.raises(PlayStoreClientError, match="受众占比无效"):
+                PlayStoreClient.parse_experiment_report_startup(
+                    _startup_envelope(self.TYPE_URL, damaged),
+                    experiment_id=self.EXP,
+                )
+
     def test_non_numeric_experiment_id_raises(self, client: PlayStoreClient) -> None:
         with pytest.raises(PlayStoreClientError, match="纯数字"):
             client.get_experiment_report_raw(

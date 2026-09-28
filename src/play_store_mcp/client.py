@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import random
 import re
@@ -5022,9 +5023,9 @@ class PlayStoreClient:
                 f"实验报告第 {index} 个变体的名称字段不是字符串。拒绝返回空报告。"
             )
         fraction = cls._proto_double(cls._proto_field(variant, 4))
-        if fraction is None:
+        if fraction is None or not math.isfinite(fraction) or not 0 <= fraction <= 1:
             raise PlayStoreClientError(
-                f"实验报告第 {index} 个变体缺少受众占比。拒绝返回空报告。"
+                f"实验报告第 {index} 个变体的受众占比无效。拒绝返回空报告。"
             )
         return label, int(round(fraction * 100))
 
@@ -5079,6 +5080,20 @@ class PlayStoreClient:
             raise PlayStoreClientError(
                 f"实验报告出现未识别字段 {sorted(unknown)}。拒绝返回空报告。"
             )
+        # Fields 2 and 4 are messages. A truncated length-delimited value falls
+        # back to raw bytes in the generic decoder; that is not a message.
+        for field, label in ((2, "result"), (4, "metadata")):
+            for index, item in enumerate(decoded.get(field, [])):
+                if not isinstance(item, dict):
+                    raise PlayStoreClientError(
+                        f"实验报告字段 {field}（{label}）第 {index} 个值不是消息。"
+                        "拒绝返回空报告。"
+                    )
+        for index, treatment in enumerate(decoded.get(5, [])):
+            if not isinstance(treatment, dict):
+                raise PlayStoreClientError(
+                    f"实验报告第 {index} 个 treatment 不是消息。拒绝返回残缺报告。"
+                )
         metadata = cls._proto_field(decoded, 4)
         result = cls._proto_field(decoded, 2)
         if not isinstance(metadata, dict) or not isinstance(result, dict):
@@ -5112,6 +5127,8 @@ class PlayStoreClient:
             raise PlayStoreClientError("实验报告没有变体行。拒绝返回空报告。")
         labeled = [cls._report_variant(item, index) for index, item in enumerate(variant_msgs)]
         missing = [label for label, _percent in labeled if label is None]
+        if len(missing) == len(labeled):
+            raise PlayStoreClientError("实验报告所有变体都无名称。拒绝返回残缺报告。")
         if len(missing) > 1:
             raise PlayStoreClientError(
                 "实验报告有多行没有变体名称，无法对应详情页的 Current listing。拒绝返回空报告。"
