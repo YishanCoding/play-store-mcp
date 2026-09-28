@@ -1660,6 +1660,41 @@ class TestExperimentReport:
                 experiment_id=self.EXP,
             )
 
+    def test_report_outer_length_mismatch_raises(self) -> None:
+        # Complete valid report followed by a field claiming five missing bytes.
+        damaged = self._payload() + b"\x4a\x05\x00"
+        with pytest.raises(PlayStoreClientError, match="长度"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, damaged), experiment_id=self.EXP
+            )
+
+    def test_report_base64_invalid_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="protobuf 无法解码"):
+            PlayStoreClient.parse_experiment_report_startup(
+                {"1": {"1": self.TYPE_URL, "2": "%%%"}}, experiment_id=self.EXP
+            )
+
+    def test_missing_result_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="缺少 metadata 或 result"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, _proto_bytes(4, self._metadata())),
+                experiment_id=self.EXP,
+            )
+
+    def test_missing_metadata_only_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="缺少 metadata 或 result"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, _proto_bytes(2, self._named_result())),
+                experiment_id=self.EXP,
+            )
+
+    def test_report_id_mismatch_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="id 与请求不一致"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, self._payload()),
+                experiment_id="1",
+            )
+
     def test_truncated_treatment_raises(self) -> None:
         old = _proto_bytes(
             5,

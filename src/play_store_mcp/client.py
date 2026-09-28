@@ -4424,7 +4424,12 @@ class PlayStoreClient:
             shift += 7
 
     @classmethod
-    def _decode_protobuf_generic(cls, buf: bytes) -> dict[int, list[Any]]:
+    def _decode_protobuf_generic(
+        cls,
+        buf: bytes,
+        message_paths: frozenset[tuple[int, ...]] | None = None,
+        path: tuple[int, ...] = (),
+    ) -> dict[int, list[Any]]:
         """Schema-less protobuf wire-format decode.
 
         Returns {field_number: [value, ...]} (repeated fields collect all
@@ -4460,15 +4465,23 @@ class PlayStoreClient:
                 chunk = buf[pos:pos + length]
                 pos += length
                 val = None
+                current_path = (*path, field_num)
+                # An empty length-delimited value is both a valid empty message
+                # and an empty string. The report contract identifies which
+                # observed paths are messages; other callers keep old behavior.
+                if not chunk and message_paths and current_path in message_paths:
+                    val = {}
                 try:
                     s = chunk.decode("utf-8")
-                    if s.isprintable():
+                    if val is None and s.isprintable():
                         val = s
                 except UnicodeDecodeError:
                     pass
                 if val is None:
                     try:
-                        val = cls._decode_protobuf_generic(chunk) if chunk else {}
+                        val = cls._decode_protobuf_generic(
+                            chunk, message_paths=message_paths, path=current_path
+                        ) if chunk else {}
                     except PlayStoreClientError:
                         val = _ProtoRawChunk(chunk)
             elif wire_type in (1, 5):
@@ -4519,6 +4532,12 @@ class PlayStoreClient:
     # 2026-09-28 JuJuBit details response: 2 result, 4 metadata, 5 treatments,
     # 7 iconsUniform, 8 validAppName, 9 control.
     _EXPERIMENT_REPORT_PAGE_FIELDS = frozenset({2, 4, 5, 7, 8, 9})
+    # Contract v3 C3: message paths observed in the saved report, including
+    # ancestors of the values that flow into variants and image URLs.
+    _EXPERIMENT_REPORT_MESSAGE_PATHS = frozenset({
+        (2,), (2, 3), (4,), (4, 1), (4, 7), (5,), (5, 6),
+        (5, 6, 1), (9,), (9, 4), (9, 5), (9, 6), (9, 6, 1),
+    })
 
     @staticmethod
     def _require_console_numeric_id(value: str, label: str) -> str:
@@ -5062,21 +5081,31 @@ class PlayStoreClient:
         return image_urls, unique_texts[:50]
 
     @classmethod
-    def _has_raw_chunk(cls, value: Any) -> bool:
-        if isinstance(value, _ProtoRawChunk):
-            try:
-                text = value.decode("utf-8")
-            except UnicodeDecodeError:
-                return True
-            return not all(ch.isprintable() or ch in "\n\r\t" for ch in text)
-        if isinstance(value, dict):
-            return any(
-                cls._has_raw_chunk(item)
-                for items in value.values()
-                if isinstance(items, list)
-                for item in items
-            )
-        return False
+    def _validate_report_wire_types(
+        cls, message: dict[int, list[Any]], path: tuple[int, ...] = ()
+    ) -> None:
+        """Check observed message types and confine raw text to field 9/3."""
+        for field, items in message.items():
+            current = (*path, field)
+            for item in items:
+                if current == (5,) and not isinstance(item, dict):
+                    raise PlayStoreClientError(
+                        "实验报告 treatment 不是消息。拒绝返回残缺报告。"
+                    )
+                if current in ((2,), (4,)) and not isinstance(item, dict):
+                    raise PlayStoreClientError(
+                        f"实验报告路径 {current[0]} 不是消息。拒绝返回残缺报告。"
+                    )
+                if isinstance(item, _ProtoRawChunk) and current != (9, 3):
+                    raise PlayStoreClientError(
+                        "实验报告内有无法解码的子消息。拒绝返回残缺报告。"
+                    )
+                if current in cls._EXPERIMENT_REPORT_MESSAGE_PATHS and not isinstance(item, dict):
+                    raise PlayStoreClientError(
+                        f"实验报告路径 {'/'.join(map(str, current))} 不是消息。拒绝返回残缺报告。"
+                    )
+                if isinstance(item, dict):
+                    cls._validate_report_wire_types(item, current)
 
     @classmethod
     def parse_experiment_report_startup(
@@ -5091,7 +5120,9 @@ class PlayStoreClient:
         )
         try:
             raw = base64.b64decode(payload_b64, validate=True)
-            decoded = cls._decode_protobuf_generic(raw)
+            decoded = cls._decode_protobuf_generic(
+                raw, message_paths=cls._EXPERIMENT_REPORT_MESSAGE_PATHS
+            )
         except PlayStoreClientError:
             raise
         except Exception as exc:
@@ -5103,27 +5134,7 @@ class PlayStoreClient:
             raise PlayStoreClientError(
                 f"实验报告出现未识别字段 {sorted(unknown)}。拒绝返回空报告。"
             )
-        # Fields 2 and 4 are messages. A truncated length-delimited value falls
-        # back to raw bytes in the generic decoder; that is not a message.
-        for field, label in ((2, "result"), (4, "metadata")):
-            for index, item in enumerate(decoded.get(field, [])):
-                if not isinstance(item, dict):
-                    raise PlayStoreClientError(
-                        f"实验报告字段 {field}（{label}）第 {index} 个值不是消息。"
-                        "拒绝返回空报告。"
-                    )
-        for index, treatment in enumerate(decoded.get(5, [])):
-            if not isinstance(treatment, dict):
-                raise PlayStoreClientError(
-                    f"实验报告第 {index} 个 treatment 不是消息。拒绝返回残缺报告。"
-                )
-        # A chunk that is neither a message nor text is a truncated message
-        # anywhere in the report. Multi-line text (field 9/3 in real reports)
-        # also falls back to a raw chunk, so text chunks stay allowed.
-        if cls._has_raw_chunk(decoded):
-            raise PlayStoreClientError(
-                "实验报告内有无法解码的子消息。拒绝返回残缺报告。"
-            )
+        cls._validate_report_wire_types(decoded)
         metadata = cls._proto_field(decoded, 4)
         result = cls._proto_field(decoded, 2)
         if not isinstance(metadata, dict) or not isinstance(result, dict):
