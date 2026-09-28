@@ -1691,11 +1691,57 @@ class TestExperimentReport:
         payload = self._payload()
         assert old in payload
         damaged = _proto_bytes(5, _proto_str(1, "Variant B") + damaged_media)
-        with pytest.raises(PlayStoreClientError, match="treatment 内有无法解码的子消息"):
+        with pytest.raises(PlayStoreClientError, match="无法解码的子消息"):
             PlayStoreClient.parse_experiment_report_startup(
                 _startup_envelope(self.TYPE_URL, payload.replace(old, damaged)),
                 experiment_id=self.EXP,
             )
+
+    def _damaged_subtree_payloads(self) -> dict[str, bytes]:
+        base, metadata, result = self._payload(), self._metadata(), self._named_result()
+        timestamp = _proto_bytes(7, _proto_varint(1, 1790048055))
+        variant = self._variant(0.33, "Variant B")
+        damaged_variant = variant.replace(_proto_bytes(2, b"\x08\x0b\x12\x00"), _proto_bytes(2, b"\x80"))
+        return {
+            "top9-image": base + _proto_bytes(9, _proto_bytes(6, _proto_bytes(1, b"\x80"))),
+            "metadata": base.replace(
+                _proto_bytes(4, metadata),
+                _proto_bytes(4, metadata.replace(
+                    timestamp, _proto_bytes(7, _proto_varint(1, 1790048055) + _proto_bytes(2, b"\x80"))
+                )),
+            ),
+            "result": base.replace(
+                _proto_bytes(2, result),
+                _proto_bytes(2, result.replace(
+                    _proto_bytes(4, _proto_varint(1, 1790048055)), _proto_bytes(4, b"\x80")
+                )),
+            ),
+            "variant": base.replace(
+                _proto_bytes(2, result),
+                _proto_bytes(2, result.replace(_proto_bytes(3, variant), _proto_bytes(3, damaged_variant))),
+            ),
+        }
+
+    @pytest.mark.parametrize("where", ["top9-image", "metadata", "result", "variant"])
+    def test_truncated_message_anywhere_raises(self, where: str) -> None:
+        payload = self._damaged_subtree_payloads()[where]
+        assert payload != self._payload()
+        with pytest.raises(PlayStoreClientError, match="无法解码的子消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                experiment_id=self.EXP,
+            )
+
+    def test_multiline_text_chunk_is_allowed(self) -> None:
+        # Real reports carry a multi-line prompt in field 9/3; it is text, not
+        # a damaged message.
+        text = "Describe your app.\nKeep it short.\n\tThanks"
+        payload = self._payload() + _proto_bytes(9, _proto_bytes(3, text.encode()))
+        report = PlayStoreClient.parse_experiment_report_startup(
+            _startup_envelope(self.TYPE_URL, payload),
+            experiment_id=self.EXP,
+        )
+        assert report.name == "Fixture experiment"
 
     def _metadata(self) -> bytes:
         return (
@@ -1733,7 +1779,7 @@ class TestExperimentReport:
     def test_truncated_variant_raises(self) -> None:
         result = _proto_str(1, self.EXP) + _proto_bytes(3, b"\x80")
         payload = _proto_bytes(2, result) + _proto_bytes(4, self._metadata())
-        with pytest.raises(PlayStoreClientError, match="变体不是消息"):
+        with pytest.raises(PlayStoreClientError, match="变体不是消息|无法解码的子消息"):
             PlayStoreClient.parse_experiment_report_startup(
                 _startup_envelope(self.TYPE_URL, payload),
                 experiment_id=self.EXP,

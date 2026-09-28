@@ -5064,7 +5064,11 @@ class PlayStoreClient:
     @classmethod
     def _has_raw_chunk(cls, value: Any) -> bool:
         if isinstance(value, _ProtoRawChunk):
-            return True
+            try:
+                text = value.decode("utf-8")
+            except UnicodeDecodeError:
+                return True
+            return not all(ch.isprintable() or ch in "\n\r\t" for ch in text)
         if isinstance(value, dict):
             return any(
                 cls._has_raw_chunk(item)
@@ -5113,12 +5117,13 @@ class PlayStoreClient:
                 raise PlayStoreClientError(
                     f"实验报告第 {index} 个 treatment 不是消息。拒绝返回残缺报告。"
                 )
-            # Real treatments hold only strings, ints and nested messages.
-            # Any undecodable chunk below means a damaged asset message.
-            if cls._has_raw_chunk(treatment):
-                raise PlayStoreClientError(
-                    f"实验报告第 {index} 个 treatment 内有无法解码的子消息。拒绝返回残缺报告。"
-                )
+        # A chunk that is neither a message nor text is a truncated message
+        # anywhere in the report. Multi-line text (field 9/3 in real reports)
+        # also falls back to a raw chunk, so text chunks stay allowed.
+        if cls._has_raw_chunk(decoded):
+            raise PlayStoreClientError(
+                "实验报告内有无法解码的子消息。拒绝返回残缺报告。"
+            )
         metadata = cls._proto_field(decoded, 4)
         result = cls._proto_field(decoded, 2)
         if not isinstance(metadata, dict) or not isinstance(result, dict):
