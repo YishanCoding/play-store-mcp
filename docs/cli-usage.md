@@ -66,6 +66,8 @@ gpcli store-listing-experiment list --package com.vast.jujubit --developer-id DE
 gpcli experiment-report get EXPERIMENT --package com.vast.jujubit --developer-id DEV --app-id APP
 ```
 
+`custom-store-listing list` 和 `store-listing-experiment list` 不是 Android Publisher API。它们在已登录的 OpenCLI Play Console 页面里调用只读内部 RPC（`storelistings/custom/overview:startupData` 和 `storelistingexperiments/overview:startupData`）。未登录、id 不对、或返回结构和已知页面信封对不上时，输出 `{"error": ...}` 并且退出码非 0。空列表只表示该 RPC 明确返回了 0 条。
+
 健康度与获客：
 
 ```bash

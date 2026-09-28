@@ -569,16 +569,29 @@ class AcquisitionFunnelResult(BaseModel):
 
 
 class CustomStoreListingSummary(BaseModel):
-    """A single Custom Store Listing (CSL), read from the Play Console UI.
+    """A single Custom Store Listing (CSL) from the Play Console internal RPC.
 
-    CSL configuration (targeting, content, active status) has no Android
-    Publisher API surface -- this is scraped from the Console DOM via
-    OpenCLI, not the official REST API.
+    CSL configuration has no Android Publisher API surface. The list comes
+    from ``storelistings/custom/overview:startupData`` inside a logged-in
+    Play Console page, not from the DOM and not from the official REST API.
     """
 
-    name: str = Field(..., description="Internal CSL name/slug shown in Console (not shown to end users)")
+    name: str = Field(..., description="Internal CSL name shown in Console (not shown to end users)")
     listing_id: str = Field(..., description="Numeric CSL id used in the Console edit URL")
     edit_url: str = Field(..., description="Full Console URL to edit this CSL")
+    status: str | None = Field(
+        None,
+        description="Console status label. 'live' is field 5 == 1, confirmed on the edit page",
+    )
+    status_code: int | None = Field(None, description="Raw status enum from the overview payload")
+    targeting_type: str | None = Field(
+        None,
+        description="How the listing is targeted: 'url' (URL parameter) or 'country'",
+    )
+    targeting: str | None = Field(
+        None,
+        description="URL parameter value, or comma-separated country codes",
+    )
 
 
 class CustomStoreListingsResult(BaseModel):
@@ -589,22 +602,22 @@ class CustomStoreListingsResult(BaseModel):
 
 
 class StoreListingExperimentSummary(BaseModel):
-    """A single Store Listing Experiment (A/B test), decoded from Console RPC.
+    """A single Store Listing Experiment from the Play Console internal RPC.
 
-    Experiments have no Android Publisher API surface -- this is decoded
-    from an internal protobuf response captured via OpenCLI network
-    capture. Field semantics beyond experiment_id/name/locale are inferred
-    from the response shape, not from an official schema, and may be
-    wrong or incomplete for experiment types this wasn't tested against.
+    Experiments have no Android Publisher API surface. The list comes from
+    ``storelistingexperiments/overview:startupData``. Field numbers other
+    than experiment_id / name / locale were checked against one live
+    response and one saved fixture, not an official schema.
     """
 
     experiment_id: str = Field(..., description="Numeric experiment id")
     name: str = Field(..., description="Experiment display name (often encodes what's being tested)")
     locale: str = Field("", description="Locale the experiment is scoped to")
-    dimension_type: int | None = Field(None, description="Inferred asset-type enum (e.g. phone screenshots); unverified against an official schema")
-    status: int | None = Field(None, description="Inferred status enum (e.g. running); unverified against an official schema")
-    start_timestamp: str | None = Field(None, description="Inferred experiment start time (ISO), decoded from an embedded protobuf Timestamp")
-    traffic_split: float | None = Field(None, description="Inferred traffic split fraction for the variant arm")
+    dimension_type: int | None = Field(None, description="Asset-type enum from overview field 4; not an official schema name")
+    status: int | None = Field(None, description="Status enum from overview field 3. The experiments UI route currently redirects, so this integer is not mapped to a label")
+    start_timestamp: str | None = Field(None, description="Start time (ISO) from overview field 7, a protobuf Timestamp")
+    end_timestamp: str | None = Field(None, description="Later timestamp (ISO) from overview field 18. The experiments page redirects, so this was not confirmed against the UI label")
+    traffic_split: float | None = Field(None, description="Variant traffic fraction from overview field 10 (fixed64 double)")
 
 
 class StoreListingExperimentsResult(BaseModel):
