@@ -40,6 +40,7 @@ from play_store_mcp.models import (
     DeploymentResult,
     ExpansionFile,
     ExperimentReportRaw,
+    ExperimentReportVariant,
     GeneratedApkInfo,
     GrantInfo,
     ImageInfo,
@@ -4499,6 +4500,18 @@ class PlayStoreClient:
         "ExperimentOverviewPageStartupDataResponse"
     )
     _EXPERIMENTS_PAGE_FIELDS = frozenset({1, 4, 5})
+    _EXPERIMENT_REPORT_RPC = (
+        "https://playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
+        "storelistingexperiments/report:startupData"
+    )
+    _EXPERIMENT_REPORT_TYPE = (
+        "type.googleapis.com/play.console.apps.api.storelistingexperiments."
+        "ExperimentReportPageStartupDataResponse"
+    )
+    # Top-level fields of ExperimentReportPageStartupDataResponse seen on the
+    # 2026-09-28 JuJuBit details response: 2 result, 4 metadata, 5 treatments,
+    # 7 iconsUniform, 8 validAppName, 9 control.
+    _EXPERIMENT_REPORT_PAGE_FIELDS = frozenset({2, 4, 5, 7, 8, 9})
 
     @staticmethod
     def _require_console_numeric_id(value: str, label: str) -> str:
@@ -4703,15 +4716,28 @@ class PlayStoreClient:
             time.sleep(min(self._CONSOLE_POLL_INTERVAL_S, remaining))
         self._raise_console_navigation_timeout(app_list_url, probe)
 
-    def _play_console_startup_rpc(self, url: str, developer_id: str, app_id: str) -> dict[str, Any]:
-        """POST one read-only Play Console startupData RPC from the logged-in page."""
+    def _play_console_startup_rpc(
+        self,
+        url: str,
+        developer_id: str,
+        app_id: str,
+        *,
+        body: dict[str, Any] | None = None,
+        failure_noun: str = "空列表",
+    ) -> dict[str, Any]:
+        """POST one read-only Play Console startupData RPC from the logged-in page.
+
+        ``body`` defaults to the overview app reference
+        ``{"2":{"1":{"1":developer_id},"2":{"1":app_id}}}``. Callers that pass
+        ``body`` still need numeric developer and app ids for the login recovery
+        navigation.
+        """
         developer_id = self._require_console_numeric_id(developer_id, "developer-id")
         app_id = self._require_console_numeric_id(app_id, "app-id")
         rpc_name = url.split("/developers/apps/", 1)[-1]
-        body = json.dumps(
-            {"2": {"1": {"1": developer_id}, "2": {"1": app_id}}},
-            separators=(",", ":"),
-        )
+        if body is None:
+            body = {"2": {"1": {"1": developer_id}, "2": {"1": app_id}}}
+        body_json = json.dumps(body, separators=(",", ":"))
         js = f"""
 (async function() {{
   const href = String(location.href || '');
@@ -4727,7 +4753,7 @@ class PlayStoreClient:
   const auth = 'SAPISIDHASH ' + ts + '_' + sha1;
   const httpHeaders = 'Content-Type:application/json+protobuf\\r\\nX-Goog-AuthUser:0\\r\\nAuthorization:' + auth + '\\r\\nX-Goog-Api-Key:{self._CONSOLE_API_KEY}\\r\\n';
   const url = '{url}?$httpHeaders=' + encodeURIComponent(httpHeaders);
-  const resp = await fetch(url, {{method: 'POST', body: {json.dumps(body)}, credentials: 'include'}});
+  const resp = await fetch(url, {{method: 'POST', body: {json.dumps(body_json)}, credentials: 'include'}});
   const text = await resp.text();
   return JSON.stringify({{httpStatus: resp.status, body: text.slice(0, 2000000)}});
 }})()
@@ -4753,7 +4779,7 @@ class PlayStoreClient:
             http_status = status if isinstance(status, int) and not isinstance(status, bool) else None
             raise PlayStoreClientError(
                 f"Play Console RPC {rpc_name} 失败，HTTP {status}，app-id {app_id}。"
-                f"{detail[:300]} 这不是空列表。",
+                f"{detail[:300]} 这不是{failure_noun}。",
                 status=http_status,
             )
         try:
@@ -4972,6 +4998,146 @@ class PlayStoreClient:
         )
         return self.parse_store_listing_experiments_startup(response, package_name)
 
+    @staticmethod
+    def _require_experiment_id(experiment_id: str) -> str:
+        if isinstance(experiment_id, int) and not isinstance(experiment_id, bool) and experiment_id >= 0:
+            experiment_id = str(experiment_id)
+        if not isinstance(experiment_id, str) or not experiment_id.isdigit():
+            raise PlayStoreClientError(
+                f"experiment-id 必须是纯数字，收到 {experiment_id!r}。拒绝返回空报告。"
+            )
+        return experiment_id
+
+    @classmethod
+    def _report_variant(cls, variant: Any, index: int) -> tuple[str | None, int]:
+        if not isinstance(variant, dict):
+            raise PlayStoreClientError(f"实验报告第 {index} 个变体不是消息。拒绝返回空报告。")
+        name = cls._proto_field(variant, 3)
+        if name is None:
+            label: str | None = None
+        elif isinstance(name, str) and name:
+            label = name
+        else:
+            raise PlayStoreClientError(
+                f"实验报告第 {index} 个变体的名称字段不是字符串。拒绝返回空报告。"
+            )
+        fraction = cls._proto_double(cls._proto_field(variant, 4))
+        if fraction is None:
+            raise PlayStoreClientError(
+                f"实验报告第 {index} 个变体缺少受众占比。拒绝返回空报告。"
+            )
+        return label, int(round(fraction * 100))
+
+    @classmethod
+    def _report_image_urls(cls, value: Any) -> list[str]:
+        """https URLs stored as protobuf strings, in wire order.
+
+        A byte-level scan would swallow the next tag when that byte is also a
+        URL character. Walking the decoded strings keeps each URL intact.
+        """
+        found: list[str] = []
+        if isinstance(value, str):
+            if value.startswith("https://"):
+                found.append(value)
+        elif isinstance(value, dict):
+            for items in value.values():
+                if isinstance(items, list):
+                    for item in items:
+                        found.extend(cls._report_image_urls(item))
+        return list(dict.fromkeys(found))
+
+    @classmethod
+    def _report_strings(cls, raw: bytes, decoded: dict[int, list[Any]]) -> tuple[list[str], list[str]]:
+        image_urls = cls._report_image_urls(decoded)
+        text_runs = re.findall(rb"[ -~]{12,}", raw)
+        unique_texts = list(dict.fromkeys(item.decode("ascii", errors="ignore") for item in text_runs))
+        unique_texts.sort(key=len, reverse=True)
+        return image_urls, unique_texts[:50]
+
+    @classmethod
+    def parse_experiment_report_startup(
+        cls,
+        response: dict[str, Any],
+        experiment_id: str,
+    ) -> ExperimentReportRaw:
+        """Parse a ``report:startupData`` JSON body. No browser calls."""
+        experiment_id = cls._require_experiment_id(experiment_id)
+        payload_b64 = cls._startup_payload_b64(
+            response, cls._EXPERIMENT_REPORT_TYPE, "实验报告"
+        )
+        try:
+            raw = base64.b64decode(payload_b64, validate=True)
+            decoded = cls._decode_protobuf_generic(raw)
+        except PlayStoreClientError:
+            raise
+        except Exception as exc:
+            raise PlayStoreClientError("实验报告 protobuf 无法解码。拒绝返回空报告。") from exc
+        if not isinstance(decoded, dict):
+            raise PlayStoreClientError("实验报告 protobuf 解码结果不是消息。拒绝返回空报告。")
+        unknown = set(decoded) - cls._EXPERIMENT_REPORT_PAGE_FIELDS
+        if unknown:
+            raise PlayStoreClientError(
+                f"实验报告出现未识别字段 {sorted(unknown)}。拒绝返回空报告。"
+            )
+        metadata = cls._proto_field(decoded, 4)
+        result = cls._proto_field(decoded, 2)
+        if not isinstance(metadata, dict) or not isinstance(result, dict):
+            raise PlayStoreClientError("实验报告缺少 metadata 或 result。拒绝返回空报告。")
+        name = cls._proto_field(metadata, 2)
+        if not isinstance(name, str) or not name:
+            raise PlayStoreClientError("实验报告缺少实验名称。拒绝返回空报告。")
+        metadata_id = cls._proto_path(metadata, 1, 3, 1)
+        result_id = cls._proto_field(result, 1)
+        if isinstance(metadata_id, int) and not isinstance(metadata_id, bool):
+            metadata_id = str(metadata_id)
+        if isinstance(result_id, int) and not isinstance(result_id, bool):
+            result_id = str(result_id)
+        if metadata_id != experiment_id or result_id != experiment_id:
+            raise PlayStoreClientError(
+                "实验报告里的 experiment id 与请求不一致"
+                f"（metadata {metadata_id!r}，result {result_id!r}，请求 {experiment_id}）。"
+                "拒绝返回空报告。"
+            )
+        status_code = cls._proto_field(metadata, 3)
+        dimension_type = cls._proto_field(metadata, 4)
+        if not isinstance(status_code, int) or isinstance(status_code, bool):
+            raise PlayStoreClientError("实验报告缺少状态字段。拒绝返回空报告。")
+        if not isinstance(dimension_type, int) or isinstance(dimension_type, bool):
+            raise PlayStoreClientError("实验报告缺少 experiment type 字段。拒绝返回空报告。")
+        start_timestamp = cls._proto_timestamp(cls._proto_field(metadata, 7))
+        if start_timestamp is None:
+            raise PlayStoreClientError("实验报告缺少开始时间。拒绝返回空报告。")
+        variant_msgs = result.get(3) or []
+        if not isinstance(variant_msgs, list) or not variant_msgs:
+            raise PlayStoreClientError("实验报告没有变体行。拒绝返回空报告。")
+        labeled = [cls._report_variant(item, index) for index, item in enumerate(variant_msgs)]
+        missing = [label for label, _percent in labeled if label is None]
+        if len(missing) > 1:
+            raise PlayStoreClientError(
+                "实验报告有多行没有变体名称，无法对应详情页的 Current listing。拒绝返回空报告。"
+            )
+        variants: list[ExperimentReportVariant] = []
+        for label, percent in labeled:
+            variants.append(
+                ExperimentReportVariant(
+                    name=label or "Current listing",
+                    audience_percent=percent,
+                )
+            )
+        image_urls, text_strings = cls._report_strings(raw, decoded)
+        if not image_urls and not text_strings:
+            raise PlayStoreClientError("实验报告解码后没有图片 URL，也没有可读文本。拒绝返回空报告。")
+        return ExperimentReportRaw(
+            experiment_id=experiment_id,
+            image_urls=image_urls,
+            text_strings=text_strings,
+            name=name,
+            status_code=status_code,
+            start_timestamp=start_timestamp,
+            dimension_type=dimension_type,
+            variants=variants,
+        )
+
     def get_experiment_report_raw(
         self,
         package_name: str,
@@ -4979,13 +5145,12 @@ class PlayStoreClient:
         app_id: str,
         experiment_id: str,
     ) -> ExperimentReportRaw:
-        """Fetch the raw decodable content of one experiment's report page.
+        """Fetch one experiment report via the Play Console internal read RPC.
 
-        Does not attempt full field-level parsing of performance metrics
-        (no official schema available for this endpoint). Surfaces creative
-        image URLs and readable text runs found in the payload -- useful
-        for confirming what's actually being tested (e.g. control vs
-        variant screenshot sets) without guessing at metric field numbers.
+        The old report URL redirects to the developer home and never issues
+        ``report:startupData``. This POSTs that read-only RPC from whatever
+        logged-in Play Console page is open. The request body is the page
+        startup oneof field 6, a store listing experiment reference.
 
         Args:
             package_name: App package name (display only).
@@ -4994,39 +5159,25 @@ class PlayStoreClient:
             experiment_id: Numeric experiment id (from get_store_listing_experiments).
 
         Returns:
-            ExperimentReportRaw with image URLs and readable text strings.
+            ExperimentReportRaw. Missing login, a non-200, a type mismatch,
+            a damaged payload, or a missing result/metadata section raises
+            PlayStoreClientError instead of an empty report.
         """
-        url = (
-            f"https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}"
-            f"/store-listing-experiments/{experiment_id}/report"
+        experiment_id = self._require_experiment_id(experiment_id)
+        developer_id = self._require_console_numeric_id(developer_id, "developer-id")
+        app_id = self._require_console_numeric_id(app_id, "app-id")
+        body = {
+            "6": {
+                "1": {"1": developer_id},
+                "2": {"1": app_id},
+                "3": {"1": experiment_id},
+            }
+        }
+        response = self._play_console_startup_rpc(
+            self._EXPERIMENT_REPORT_RPC,
+            developer_id,
+            app_id,
+            body=body,
+            failure_noun="空报告",
         )
-        self._run_opencli_cli(["open", url], timeout=45)
-        time.sleep(4)
-
-        detail_key = (
-            "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
-            "storelistingexperiments/report:startupData"
-        )
-        raw = self._run_opencli_cli(["network", "--since", "60s", "--detail", detail_key], timeout=30)
-        try:
-            envelope = json.loads(raw)
-        except json.JSONDecodeError:
-            raise PlayStoreClientError(f"Invalid JSON from experiment report capture: {raw[:200]}")
-
-        body_b64 = envelope.get("body", {}).get("2")
-        if not body_b64:
-            return ExperimentReportRaw(experiment_id=experiment_id, image_urls=[], text_strings=[])
-
-        raw_bytes = base64.b64decode(body_b64)
-        urls = list(dict.fromkeys(re.findall(rb"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", raw_bytes)))
-        image_urls = [u.decode("utf-8", errors="ignore") for u in urls]
-
-        text_runs = re.findall(rb"[ -~]{12,}", raw_bytes)
-        unique_texts = list(dict.fromkeys(t.decode("ascii", errors="ignore") for t in text_runs))
-        unique_texts.sort(key=len, reverse=True)
-
-        return ExperimentReportRaw(
-            experiment_id=experiment_id,
-            image_urls=image_urls,
-            text_strings=unique_texts[:50],
-        )
+        return self.parse_experiment_report_startup(response, experiment_id)

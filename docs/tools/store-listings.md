@@ -97,3 +97,31 @@ list_all_listings("com.example.myapp")
 ```
 
 Returns a list of listings for every language configured in the Play Console.
+
+---
+
+## get_experiment_report_raw
+
+Read one store listing experiment report. This is not an Android Publisher call. `gpcli experiment-report get` POSTs `storelistingexperiments/report:startupData` from the logged-in OpenCLI Play Console page.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `package_name` | string | Yes | App package name (display only) |
+| `developer_id` | string | Yes | Numeric developer id from the Play Console URL |
+| `app_id` | string | Yes | Numeric app id from the Play Console URL |
+| `experiment_id` | string | Yes | Numeric experiment id. A non-numeric value errors before the RPC |
+
+Request body: `{"6":{"1":{"1":"<developer_id>"},"2":{"1":"<app_id>"},"3":{"1":"<experiment_id>"}}}`.
+
+Returns `experiment_id`, `image_urls`, `text_strings`, plus `name`, `status_code`, `start_timestamp`, `dimension_type`, and `variants` (`name`, `audience_percent`). Checked on the details page `store-listings/0/experiments/<id>/details` (2026-09-28, experiment 9063393730453672176):
+
+| Output | Proto field | UI text |
+|---|---|---|
+| `name` | metadata 2 | heading `JJB-100-Android-71-position` |
+| `status_code` | metadata 3, raw int | Status `Running` when the value is 1 |
+| `start_timestamp` | metadata 7 | `Started on Sep 22, 2026` |
+| `dimension_type` | metadata 4, raw int | Experiment type `Default graphics` when the value is 2 |
+| `variants[].name` | result 3.3, or `Current listing` when that field is absent | Variants table row label |
+| `variants[].audience_percent` | result 3.4 fraction × 100, rounded | Audience column `34%` / `33%` / `33%` |
+
+Install and performance cells on that page were `-`. Those numbers are not output. An unknown experiment id is HTTP 404. A wrong app id is HTTP 403. Either one exits non-zero and does not print an empty report.

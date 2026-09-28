@@ -1641,14 +1641,26 @@ def get_experiment_report_raw(
     app_id: str,
     experiment_id: str,
 ) -> dict[str, Any]:
-    """Fetch raw decodable content of one Store Listing Experiment's report (OpenCLI).
+    """Fetch one Store Listing Experiment report via the Play Console read RPC.
 
-    Companion to get_store_listing_experiments. Does not attempt to parse performance
-    metrics (installs/conversion lift per variant) -- no official schema is available
-    for that part of the response. Surfaces creative image URLs and readable text runs
-    found in the payload, which is enough to confirm what's actually being compared
-    (e.g. which screenshot set is the control vs the variant) without guessing at
-    metric field numbers.
+    Companion to get_store_listing_experiments. POSTs
+    storelistingexperiments/report:startupData from the logged-in OpenCLI page.
+    The body is page-startup field 6, the experiment reference
+    (developer id, app id, experiment id). It does not open the report URL:
+    that path redirects away and the page never sends this RPC.
+
+    experiment_id must be all digits. A non-200 (unknown id is HTTP 404,
+    wrong app id is HTTP 403), a payload type mismatch, damaged protobuf, or
+    a response missing the result/metadata section raises instead of returning
+    an empty report.
+
+    name, status_code, start_timestamp, dimension_type, and variants
+    (name + audience_percent) were checked against the details page
+    store-listings/0/experiments/{id}/details. status_code 1 was the Status
+    line "Running"; dimension_type 2 was the Experiment type line "Default
+    graphics". Audience percent is the Variants table Audience column.
+    Install and performance cells on that page were "-" and are not named
+    fields. image_urls and text_strings remain raw extractions from the payload.
 
     REQUIREMENT: OpenCLI must be installed and the automation browser must be
     logged into Play Console (play.google.com/console).
@@ -1660,8 +1672,8 @@ def get_experiment_report_raw(
         experiment_id: Numeric experiment id (from get_store_listing_experiments)
 
     Returns:
-        image_urls: Creative image URLs found in the report payload
-        text_strings: Readable text runs found in the report payload (longest first)
+        experiment_id, name, status_code, start_timestamp, dimension_type,
+        variants, image_urls, and text_strings
     """
     client = get_client()
     result = client.get_experiment_report_raw(

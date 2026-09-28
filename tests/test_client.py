@@ -1576,3 +1576,95 @@ class TestBrowserStats:
                     start_date="2024-01-01",
                     end_date="2024-01-31",
                 )
+
+
+def _proto_fixed64(field: int, payload: bytes) -> bytes:
+    return _varint((field << 3) | 1) + payload
+
+
+class TestExperimentReport:
+    """Offline parser tests for the experiment report RPC."""
+
+    TYPE_URL = PlayStoreClient._EXPERIMENT_REPORT_TYPE
+    EXP = "9063393730453672000"
+
+    def _reference(self) -> bytes:
+        return (
+            _proto_bytes(1, _proto_varint(1, 100))
+            + _proto_bytes(2, _proto_varint(1, 200))
+            + _proto_bytes(3, _proto_str(1, self.EXP))
+        )
+
+    def _variant(self, fraction: float, name: str | None) -> bytes:
+        import struct
+
+        body = _proto_bytes(2, _proto_varint(1, 11) + _proto_str(2, ""))
+        if name is not None:
+            body += _proto_str(3, name)
+        body += _proto_fixed64(4, struct.pack("<d", fraction))
+        return body
+
+    def _payload(self) -> bytes:
+        metadata = (
+            _proto_bytes(1, self._reference())
+            + _proto_str(2, "Fixture experiment")
+            + _proto_varint(3, 1)
+            + _proto_varint(4, 2)
+            + _proto_bytes(7, _proto_varint(1, 1790048055))
+        )
+        result = (
+            _proto_str(1, self.EXP)
+            + _proto_bytes(3, self._variant(0.34, None))
+            + _proto_bytes(3, self._variant(0.33, "Variant B"))
+            + _proto_bytes(4, _proto_varint(1, 1790048055))
+        )
+        image = _proto_str(2, "https://example.com/fixture-screenshot.png")
+        treatment = _proto_str(1, "Variant B") + _proto_bytes(6, _proto_bytes(1, image))
+        return (
+            _proto_bytes(2, result)
+            + _proto_bytes(4, metadata)
+            + _proto_bytes(5, treatment)
+            + _proto_varint(7, 1)
+            + _proto_varint(8, 1)
+        )
+
+    def test_parse_fixture(self) -> None:
+        result = PlayStoreClient.parse_experiment_report_startup(
+            _startup_envelope(self.TYPE_URL, self._payload()),
+            experiment_id=self.EXP,
+        )
+        assert result.experiment_id == self.EXP
+        assert result.name == "Fixture experiment"
+        assert result.status_code == 1
+        assert result.dimension_type == 2
+        assert result.start_timestamp == "2026-09-22T03:34:15+00:00"
+        assert [(item.name, item.audience_percent) for item in result.variants] == [
+            ("Current listing", 34),
+            ("Variant B", 33),
+        ]
+        assert result.image_urls == ["https://example.com/fixture-screenshot.png"]
+        assert any("Fixture experiment" in item for item in result.text_strings)
+
+    def test_missing_metadata_raises(self) -> None:
+        payload = _proto_varint(7, 1) + _proto_varint(8, 1)
+        with pytest.raises(PlayStoreClientError, match="缺少 metadata 或 result"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                experiment_id=self.EXP,
+            )
+
+    def test_damaged_protobuf_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="protobuf"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, b"\x80"),
+                experiment_id=self.EXP,
+            )
+
+    def test_non_numeric_experiment_id_raises(self, client: PlayStoreClient) -> None:
+        with pytest.raises(PlayStoreClientError, match="纯数字"):
+            client.get_experiment_report_raw(
+                package_name="com.example.app",
+                developer_id="100",
+                app_id="200",
+                experiment_id="abc",
+            )

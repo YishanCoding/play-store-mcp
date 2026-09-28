@@ -657,18 +657,68 @@ class StoreListingExperimentsResult(BaseModel):
     experiments: list[StoreListingExperimentSummary] = Field(default_factory=list)
 
 
-class ExperimentReportRaw(BaseModel):
-    """Raw decoded content of a single experiment's report page.
+class ExperimentReportVariant(BaseModel):
+    """One row of the experiment details results table.
 
-    This does not attempt to fully name every protobuf field (no official
-    schema is available). It surfaces what's reliably extractable: any
-    embedded image URLs (control/variant creative) and readable text runs
-    (e.g. the live listing copy embedded in the report for reference).
+    Checked on 2026-09-28 against
+    https://play.google.com/console/u/0/developers/6287361731679611511/app/4973755093875388037/store-listings/0/experiments/9063393730453672176/details
+    The Variants table rows were "Current listing" 34%, "7-1 last (1,2,3,4,5,6,7-1)" 33%,
+    and "7-1 third (1,2,7-1,3,4,5,6)" 33%. Install and performance cells on that page were "-".
+    """
+
+    name: str = Field(..., description="Variant label from result field 3.3. The one row with no proto name was the UI label 'Current listing'")
+    audience_percent: int = Field(
+        ...,
+        description=(
+            "Audience column. Result field 3.4 is a fixed64 double fraction; "
+            "the page showed 34/33/33 for fractions 0.34/0.33/0.33, so this is round(fraction * 100)."
+        ),
+    )
+
+
+class ExperimentReportRaw(BaseModel):
+    """One store listing experiment report from ``report:startupData``.
+
+    ``image_urls`` and ``text_strings`` stay the raw extractions from the
+    protobuf bytes. Named fields below were checked against the details page
+    linked on each field. Counts that the page showed as "-" are not given
+    metric names.
     """
 
     experiment_id: str = Field(..., description="Numeric experiment id")
     image_urls: list[str] = Field(default_factory=list, description="Creative image URLs found in the report payload, in encounter order")
     text_strings: list[str] = Field(default_factory=list, description="Readable UTF-8 string runs found in the report payload, deduplicated, longest first")
+    name: str = Field(
+        ...,
+        description=(
+            "Experiment display name from metadata field 2. "
+            "The details page heading was 'JJB-100-Android-71-position'."
+        ),
+    )
+    status_code: int = Field(
+        ...,
+        description=(
+            "Raw status integer from metadata field 3. "
+            "On that details page the Status line was 'Running' while field 3 was 1. "
+            "No other code was in the response, so this stays the raw integer."
+        ),
+    )
+    start_timestamp: str = Field(
+        ...,
+        description=(
+            "Start time (ISO) from metadata field 7, a protobuf Timestamp. "
+            "The details page showed 'Started on Sep 22, 2026', the UTC date of field 7 "
+            "(2026-09-22T03:34:15Z on that response). Result field 4 was the same timestamp."
+        ),
+    )
+    dimension_type: int = Field(
+        ...,
+        description=(
+            "Raw integer from metadata field 4. The details page line 'Experiment type' "
+            "read 'Default graphics' while field 4 was 2. No other value was in that response."
+        ),
+    )
+    variants: list[ExperimentReportVariant] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
