@@ -1560,20 +1560,19 @@ def get_custom_store_listings(
     developer_id: str,
     app_id: str,
 ) -> dict[str, Any]:
-    """List Custom Store Listings (CSL) for an app via Play Console UI scrape (OpenCLI).
+    """List Custom Store Listings (CSL) via the Play Console internal read RPC.
 
-    CSL configuration has NO Android Publisher API surface at all -- confirmed by
-    cross-checking the full REST resource index (only v3.edits.listings exists for
-    the Main store listing; nothing for custom listings). This reads the Console UI
-    directly via OpenCLI browser automation instead.
+    CSL configuration has no Android Publisher API. This POSTs
+    storelistings/custom/overview:startupData from the logged-in OpenCLI page
+    (SAPISIDHASH). It does not scrape the store-listings DOM. An empty list is
+    returned only when that RPC's payload confirms zero listings; login, HTTP,
+    and schema failures raise instead.
 
     REQUIREMENT: OpenCLI must be installed and the automation browser must be
     logged into Play Console (play.google.com/console).
 
-    LIMITATION: returns each CSL's internal name and edit URL only. Per-CSL content
-    (title, short/full description, targeting rules) requires opening each edit URL
-    individually and was not reliably scrapable via simple selectors as of 2026-07-01
-    (Angular Material form fields) -- not yet implemented.
+    Returns name, listing_id, edit_url, status, and URL-parameter or country
+    targeting. Per-listing language is not in the overview payload.
 
     Find developer_id and app_id in the Play Console URL:
     https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listings
@@ -1599,18 +1598,21 @@ def get_store_listing_experiments(
     developer_id: str,
     app_id: str,
 ) -> dict[str, Any]:
-    """List Store Listing Experiments (A/B tests) for an app via Play Console RPC capture (OpenCLI).
+    """List Store Listing Experiments via the Play Console internal read RPC.
 
-    Store Listing Experiments have NO Android Publisher API surface at all -- same
-    verification as get_custom_store_listings. This decodes an internal, undocumented
-    protobuf response captured via OpenCLI network capture. There is no public schema
-    for this response, so field semantics beyond experiment_id/name/locale are INFERRED
-    from one real reverse-engineered response, not confirmed against an official spec --
-    treat dimension_type/status/traffic_split as best-effort, verify against the Console
-    UI for anything decision-critical.
+    Experiments have no Android Publisher API. This POSTs
+    storelistingexperiments/overview:startupData from the logged-in OpenCLI page.
+    The overview URL currently redirects to the developer home, so this does not
+    wait on a network capture of that navigation. An empty list is returned only
+    when the RPC payload confirms zero experiments.
 
     REQUIREMENT: OpenCLI must be installed and the automation browser must be
     logged into Play Console (play.google.com/console).
+
+    status_code is the raw overview field 3. The one live row's details page
+    showed "Running" for code 1; other codes are not labeled. start_timestamp
+    is field 7 ("Started on Sep 22, 2026" on that page). overview_field_18_timestamp
+    is field 18 and is not an end time: that page had no end time.
 
     Find developer_id and app_id in the Play Console URL:
     https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listing-experiments/overview
@@ -1621,8 +1623,9 @@ def get_store_listing_experiments(
         app_id: Numeric app ID from Play Console URL
 
     Returns:
-        experiments: List of experiments with experiment_id, name, locale, and
-                     best-effort dimension_type/status/start_timestamp/traffic_split
+        experiments: List of experiments with experiment_id, name, locale,
+                     status_code, start_timestamp, overview_field_18_timestamp,
+                     and best-effort dimension_type/traffic_split
     """
     client = get_client()
     result = client.get_store_listing_experiments(

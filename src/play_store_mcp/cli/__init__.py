@@ -179,9 +179,12 @@ def _api_payload(exc: BaseException) -> dict[str, Any]:
     status = None
     code = None
     detail = str(exc)
+    own_status = getattr(exc, "status", None)
+    if isinstance(own_status, int) and not isinstance(own_status, bool):
+        status = own_status
     http = _http_error(exc)
     if http is not None:
-        status = int(getattr(http.resp, "status", None) or 0) or None
+        status = int(getattr(http.resp, "status", None) or 0) or status
         code = getattr(http, "reason", None) or None
         try:
             body = json.loads(http.content.decode("utf-8"))
@@ -566,7 +569,7 @@ def _classify_exception(exc: BaseException) -> tuple[int, dict[str, Any]]:
         message = str(exc).lower()
         if "credential" in message or CRED_ENV.lower() in message or "no valid credentials" in message:
             return 4, _auth_payload(str(exc))
-        return 3, _api_payload(ApiError(str(exc)))
+        return 3, _api_payload(exc)
     if isinstance(exc, ApiError):
         return 3, _api_payload(exc)
     return 3, _api_payload(exc)

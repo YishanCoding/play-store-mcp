@@ -96,7 +96,15 @@ MAX_BACKOFF = 32.0  # seconds
 
 
 class PlayStoreClientError(Exception):
-    """Base exception for Play Store client errors."""
+    """Base exception for Play Store client errors.
+
+    ``status`` is the HTTP status when the failure came from an HTTP response.
+    Callers that only pass a message keep ``status is None``.
+    """
+
+    def __init__(self, *args: Any, status: int | None = None) -> None:
+        super().__init__(*args)
+        self.status = status
 
 
 def retry_with_backoff(func):  # type: ignore[no-untyped-def]
@@ -4364,20 +4372,21 @@ class PlayStoreClient:
     # =========================================================================
     # Custom Store Listings (CSL) and Store Listing Experiments (A/B tests)
     #
-    # Neither has any Android Publisher API surface (confirmed 2026-07-01 by
-    # cross-checking the full REST resource index at
-    # https://developers.google.com/android-publisher/api-ref/rest -- only
-    # v3.edits.listings exists, nothing for custom listings or experiments).
-    # These are Play Console UI-only features, so everything below reads the
-    # Console via OpenCLI browser automation instead of the REST API.
+    # Neither has an Android Publisher API. Both are read from Play Console's
+    # internal JSON-protobuf RPCs, issued with SAPISIDHASH from the logged-in
+    # OpenCLI page (same transport as the acquisition-funnel calls above):
     #
-    # The experiments RPC response is an undocumented internal protobuf
-    # (playconsoleapps-pa.clients6.google.com). There is no public .proto
-    # schema for it, so `_decode_protobuf_generic` below is a schema-less
-    # wire-format walker: it recovers field numbers/wire types/values but not
-    # field *names* beyond what we've manually confirmed by reverse
-    # engineering one real response (see StoreListingExperimentSummary
-    # docstring for which fields are trusted vs inferred).
+    #   POST .../storelistings/custom/overview:startupData
+    #   POST .../storelistingexperiments/overview:startupData
+    #
+    # Request body (both): {"2":{"1":{"1":"<developer_id>"},"2":{"1":"<app_id>"}}}
+    # A 200 whose payload decodes to the known page shape with no repeated
+    # item field is a confirmed empty list. Any other shape, a non-200, or a
+    # missing login raises PlayStoreClientError instead of returning [].
+    #
+    # `_decode_protobuf_generic` is a schema-less wire walker. Field numbers
+    # below were checked against the live JuJuBit overview responses on
+    # 2026-09-28, plus one saved experiments fixture from 2026-07-02.
     # =========================================================================
 
     def _run_opencli_cli(self, args: list[str], timeout: int = 30) -> str:
@@ -4395,13 +4404,16 @@ class PlayStoreClient:
         result = 0
         shift = 0
         while True:
+            if pos >= len(buf) or shift >= 64:
+                raise PlayStoreClientError(
+                    "protobuf varint 被截断。拒绝返回不完整的解析结果。"
+                )
             b = buf[pos]
             result |= (b & 0x7F) << shift
             pos += 1
             if not (b & 0x80):
-                break
+                return result, pos
             shift += 7
-        return result, pos
 
     @classmethod
     def _decode_protobuf_generic(cls, buf: bytes) -> dict[int, list[Any]]:
@@ -4411,6 +4423,12 @@ class PlayStoreClient:
         occurrences in order). Length-delimited fields are returned as a
         decoded UTF-8 string if printable, else recursively decoded as a
         nested message if that succeeds, else raw bytes.
+
+        Unknown wire types, field number 0, truncated varints, and
+        length/fixed fields that run past the buffer raise
+        PlayStoreClientError. A length-delimited chunk that is not a message
+        still falls back to raw bytes; that fallback does not apply to the
+        buffer this method was asked to decode.
         """
         fields: dict[int, list[Any]] = {}
         pos = 0
@@ -4418,10 +4436,19 @@ class PlayStoreClient:
             tag, pos = cls._decode_varint(buf, pos)
             field_num = tag >> 3
             wire_type = tag & 0x7
+            if field_num == 0:
+                raise PlayStoreClientError(
+                    "protobuf 字段号为 0。拒绝返回不完整的解析结果。"
+                )
             if wire_type == 0:
                 val, pos = cls._decode_varint(buf, pos)
             elif wire_type == 2:
                 length, pos = cls._decode_varint(buf, pos)
+                if length < 0 or pos + length > len(buf):
+                    raise PlayStoreClientError(
+                        f"protobuf 字段 {field_num} 的长度 {length} 超出剩余字节。"
+                        "拒绝返回不完整的解析结果。"
+                    )
                 chunk = buf[pos:pos + length]
                 pos += length
                 val = None
@@ -4434,111 +4461,466 @@ class PlayStoreClient:
                 if val is None:
                     try:
                         val = cls._decode_protobuf_generic(chunk) if chunk else {}
-                    except Exception:
+                    except PlayStoreClientError:
                         val = chunk
-            elif wire_type == 1:
-                val = buf[pos:pos + 8]
-                pos += 8
-            elif wire_type == 5:
-                val = buf[pos:pos + 4]
-                pos += 4
+            elif wire_type in (1, 5):
+                need = 8 if wire_type == 1 else 4
+                if pos + need > len(buf):
+                    raise PlayStoreClientError(
+                        f"protobuf 字段 {field_num} 的 fixed{need * 8} 剩余字节不足。"
+                        "拒绝返回不完整的解析结果。"
+                    )
+                val = buf[pos:pos + need]
+                pos += need
             else:
-                break
+                raise PlayStoreClientError(
+                    f"protobuf 出现非法 wire type {wire_type}（字段 {field_num}）。"
+                    "拒绝返回不完整的解析结果。"
+                )
             fields.setdefault(field_num, []).append(val)
         return fields
 
+    _CONSOLE_API_KEY = "AIzaSyBAha_rcoO_aGsmiR5fWbNfdOjqT0gXwbk"
+    _CSL_STARTUP_RPC = (
+        "https://playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
+        "storelistings/custom/overview:startupData"
+    )
+    _CSL_STARTUP_TYPE = (
+        "type.googleapis.com/play.console.apps.api.storelistings."
+        "CustomStoreListingsOverviewPageStartupData"
+    )
+    _CSL_PAGE_FIELDS = frozenset({1, 5, 6, 7, 10})
+    _EXPERIMENTS_STARTUP_RPC = (
+        "https://playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
+        "storelistingexperiments/overview:startupData"
+    )
     _EXPERIMENTS_STARTUP_DATA_TYPE = (
         "type.googleapis.com/play.console.apps.api.storelistingexperiments."
         "ExperimentOverviewPageStartupDataResponse"
     )
+    _EXPERIMENTS_PAGE_FIELDS = frozenset({1, 4, 5})
+
+    @staticmethod
+    def _require_console_numeric_id(value: str, label: str) -> str:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            value = str(value)
+        if not isinstance(value, str) or not value.isdigit():
+            raise PlayStoreClientError(
+                f"{label} 必须是 Play Console URL 里的数字 id，收到 {value!r}。"
+                "空列表不会当作成功。"
+            )
+        return value
+
+    @staticmethod
+    def _proto_field(message: Any, field: int) -> Any:
+        if not isinstance(message, dict):
+            return None
+        values = message.get(field)
+        if not values:
+            return None
+        return values[0]
 
     @classmethod
-    def _extract_store_listing_experiments_payload(cls, envelope: dict[str, Any]) -> str:
-        """Find the base64 protobuf payload inside an OpenCLI network detail envelope."""
-        body = envelope.get("body")
-        if not isinstance(body, dict):
-            raise PlayStoreClientError("Experiments overview capture has no JSON body object")
+    def _proto_path(cls, message: Any, *fields: int) -> Any:
+        current = message
+        for field in fields:
+            current = cls._proto_field(current, field)
+            if current is None:
+                return None
+        return current
 
-        def walk(value: Any) -> str | None:
-            if isinstance(value, dict):
-                if (
-                    value.get("1") == cls._EXPERIMENTS_STARTUP_DATA_TYPE
-                    and isinstance(value.get("2"), str)
-                    and value["2"]
-                ):
-                    return value["2"]
-                for child in value.values():
-                    found = walk(child)
-                    if found:
-                        return found
-            elif isinstance(value, list):
-                for child in value:
-                    found = walk(child)
-                    if found:
-                        return found
+    @staticmethod
+    def _proto_timestamp(message: Any) -> str | None:
+        if not isinstance(message, dict):
             return None
+        seconds = message.get(1, [None])[0]
+        if not isinstance(seconds, int):
+            return None
+        from datetime import datetime, timezone
 
-        payload = walk(body)
-        if payload:
-            return payload
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
 
-        legacy_payload = body.get("2")
-        if isinstance(legacy_payload, str) and legacy_payload:
-            return legacy_payload
+    @staticmethod
+    def _proto_double(value: Any) -> float | None:
+        import struct
 
-        raise PlayStoreClientError(
-            "Experiments overview capture did not contain a decodable startupData payload"
+        raw: bytes | None = None
+        if isinstance(value, (bytes, bytearray)) and len(value) == 8:
+            raw = bytes(value)
+        elif isinstance(value, str):
+            try:
+                decoded = bytes.fromhex(value)
+            except ValueError:
+                decoded = b""
+            if len(decoded) == 8:
+                raw = decoded
+        if raw is None:
+            return None
+        return struct.unpack("<d", raw)[0]
+
+    @classmethod
+    def _startup_payload_b64(cls, response: dict[str, Any], expected_type: str, what: str) -> str:
+        wrapper = response.get("1") if isinstance(response, dict) else None
+        if not isinstance(wrapper, dict):
+            raise PlayStoreClientError(
+                f"{what} 响应不是预期的 startupData 信封（缺少字段 1）。"
+                "拒绝返回空列表。"
+            )
+        actual_type = wrapper.get("1")
+        if actual_type != expected_type:
+            raise PlayStoreClientError(
+                f"{what} 响应类型不符：期望 {expected_type}，实际 {actual_type!r}。"
+                "拒绝返回空列表。"
+            )
+        payload = wrapper.get("2")
+        if not isinstance(payload, str) or not payload:
+            raise PlayStoreClientError(
+                f"{what} 响应没有可解码的 protobuf 载荷。拒绝返回空列表。"
+            )
+        return payload
+
+    @classmethod
+    def _decode_startup_payload(cls, payload_b64: str, what: str) -> dict[int, list[Any]]:
+        try:
+            raw = base64.b64decode(payload_b64, validate=True)
+            decoded = cls._decode_protobuf_generic(raw)
+        except PlayStoreClientError:
+            raise
+        except Exception as exc:
+            raise PlayStoreClientError(f"{what} protobuf 无法解码。拒绝返回空列表。") from exc
+        if not isinstance(decoded, dict):
+            raise PlayStoreClientError(f"{what} protobuf 解码结果不是消息。拒绝返回空列表。")
+        return decoded
+
+    @staticmethod
+    def _parse_startup_rpc_envelope(raw: str, rpc_name: str) -> dict[str, Any]:
+        try:
+            envelope = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PlayStoreClientError(
+                f"Play Console RPC {rpc_name} 没有返回 JSON。浏览器输出：{raw[:200]}"
+            ) from exc
+        if not isinstance(envelope, dict):
+            raise PlayStoreClientError(f"Play Console RPC {rpc_name} 返回了非对象 JSON。")
+        return envelope
+
+    @staticmethod
+    def _console_tab_needs_navigation(envelope: dict[str, Any]) -> bool:
+        error = envelope.get("error")
+        return isinstance(error, str) and "不在 Play Console" in error
+
+    # `opencli browser open` on Play Console often never returns, even after
+    # document.readyState is already "complete", and a stuck open blocks later
+    # evals on the same session. Move the tab with location.assign instead.
+    _CONSOLE_NAV_BUDGET_S = 30.0
+    _CONSOLE_PROBE_TIMEOUT_S = 3
+    _CONSOLE_POLL_INTERVAL_S = 0.4
+    _CONSOLE_PROBE_JS = """
+(() => JSON.stringify({
+  consoleProbe: 1,
+  href: String(location.href || '').slice(0, 300),
+  readyState: String(document.readyState || ''),
+  hasSapisid: /SAPISID=([^;]+)/.test(document.cookie || '')
+}))()
+"""
+
+    @staticmethod
+    def _console_probe_ready(probe: dict[str, Any] | None) -> bool:
+        if not isinstance(probe, dict):
+            return False
+        href = probe.get("href")
+        return (
+            isinstance(href, str)
+            and href.startswith("https://play.google.com/")
+            and probe.get("readyState") == "complete"
+            and probe.get("hasSapisid") is True
         )
 
-    def _capture_store_listing_experiments_envelope(
-        self,
-        detail_key: str,
-        max_wait_seconds: float = 15.0,
-    ) -> dict[str, Any]:
-        """Poll OpenCLI network capture until the experiments startupData response is available."""
-        deadline = time.monotonic() + max_wait_seconds
-        last_detail_error: PlayStoreClientError | None = None
-
-        while True:
-            raw_list = self._run_opencli_cli(["network", "--since", "60s"], timeout=30)
-            try:
-                network_listing = json.loads(raw_list)
-            except json.JSONDecodeError as exc:
-                raise PlayStoreClientError(
-                    f"Invalid JSON from OpenCLI network listing: {raw_list[:200]}"
-                ) from exc
-
-            entries = network_listing.get("entries", [])
-            has_target = any(
-                isinstance(entry, dict) and str(entry.get("key", "")).startswith(detail_key)
-                for entry in entries
+    def _probe_opencli_page(self) -> dict[str, Any] | None:
+        try:
+            raw = self._run_browser_js(
+                self._CONSOLE_PROBE_JS, timeout=self._CONSOLE_PROBE_TIMEOUT_S
             )
+        except (subprocess.TimeoutExpired, PlayStoreClientError):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
-            if has_target:
-                raw_detail = self._run_opencli_cli(
-                    ["network", "--since", "60s", "--detail", detail_key], timeout=30
-                )
-                try:
-                    envelope = json.loads(raw_detail)
-                except json.JSONDecodeError as exc:
-                    raise PlayStoreClientError(
-                        f"Invalid JSON from experiments overview capture: {raw_detail[:200]}"
-                    ) from exc
+    def _assign_opencli_location(self, url: str) -> None:
+        js = f"location.assign({json.dumps(url)}); 'ok'"
+        try:
+            self._run_browser_js(js, timeout=self._CONSOLE_PROBE_TIMEOUT_S)
+        except (subprocess.TimeoutExpired, PlayStoreClientError):
+            return
 
-                try:
-                    self._extract_store_listing_experiments_payload(envelope)
-                    return envelope
-                except PlayStoreClientError as exc:
-                    last_detail_error = exc
+    def _raise_console_navigation_timeout(self, app_list_url: str, probe: dict[str, Any] | None) -> None:
+        href = ""
+        ready = ""
+        has_sapisid = None
+        if isinstance(probe, dict):
+            href_value = probe.get("href")
+            ready_value = probe.get("readyState")
+            href = href_value if isinstance(href_value, str) else ""
+            ready = ready_value if isinstance(ready_value, str) else ""
+            has_sapisid = probe.get("hasSapisid")
+        where = href or "未知"
+        ready_label = ready or "unknown"
+        on_console = href.startswith("https://play.google.com/")
+        if on_console and has_sapisid is not True:
+            raise PlayStoreClientError(
+                "OpenCLI 浏览器未登录 Play Console"
+                f"（已打开 {where}，readyState={ready_label}，没有 SAPISID）。"
+                "请在 OpenCLI default 会话登录 Play Console 后重试。空列表不会当作成功。"
+            )
+        raise PlayStoreClientError(
+            "OpenCLI 浏览器不在 Play Console"
+            f"（等待跳转到 {app_list_url} 超过 {int(self._CONSOLE_NAV_BUDGET_S)} 秒，"
+            f"当前页面 {where}，readyState={ready_label}）。"
+            "请确认 default 会话已登录且没有卡住的对话框，然后重试。空列表不会当作成功。"
+        )
 
-            if time.monotonic() >= deadline:
-                if last_detail_error is not None:
-                    raise last_detail_error
+    def _ensure_opencli_on_play_console(self, app_list_url: str) -> None:
+        """Poll until the OpenCLI tab is a loaded, logged-in Play Console page.
+
+        Does not call ``opencli browser open``. A single eval timeout is treated
+        as "not ready yet" and the loop continues until the budget is spent.
+        """
+        deadline = time.monotonic() + self._CONSOLE_NAV_BUDGET_S
+        probe = self._probe_opencli_page()
+        if self._console_probe_ready(probe):
+            return
+        self._assign_opencli_location(app_list_url)
+        while time.monotonic() < deadline:
+            probe = self._probe_opencli_page()
+            if self._console_probe_ready(probe):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self._CONSOLE_POLL_INTERVAL_S, remaining))
+        self._raise_console_navigation_timeout(app_list_url, probe)
+
+    def _play_console_startup_rpc(self, url: str, developer_id: str, app_id: str) -> dict[str, Any]:
+        """POST one read-only Play Console startupData RPC from the logged-in page."""
+        developer_id = self._require_console_numeric_id(developer_id, "developer-id")
+        app_id = self._require_console_numeric_id(app_id, "app-id")
+        rpc_name = url.split("/developers/apps/", 1)[-1]
+        body = json.dumps(
+            {"2": {"1": {"1": developer_id}, "2": {"1": app_id}}},
+            separators=(",", ":"),
+        )
+        js = f"""
+(async function() {{
+  const href = String(location.href || '');
+  if (!href.startsWith('https://play.google.com/')) {{
+    return JSON.stringify({{error: 'OpenCLI 浏览器不在 Play Console 页面', href: href.slice(0, 160)}});
+  }}
+  const SAPISID = document.cookie.match(/SAPISID=([^;]+)/)?.[1];
+  if (!SAPISID) return JSON.stringify({{error: 'OpenCLI 浏览器未登录 Play Console'}});
+  const ts = Date.now();
+  const msgBuffer = new TextEncoder().encode(ts + ' ' + SAPISID + ' https://play.google.com');
+  const hashBuffer = await crypto.subtle.digest('SHA-1', msgBuffer);
+  const sha1 = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const auth = 'SAPISIDHASH ' + ts + '_' + sha1;
+  const httpHeaders = 'Content-Type:application/json+protobuf\\r\\nX-Goog-AuthUser:0\\r\\nAuthorization:' + auth + '\\r\\nX-Goog-Api-Key:{self._CONSOLE_API_KEY}\\r\\n';
+  const url = '{url}?$httpHeaders=' + encodeURIComponent(httpHeaders);
+  const resp = await fetch(url, {{method: 'POST', body: {json.dumps(body)}, credentials: 'include'}});
+  const text = await resp.text();
+  return JSON.stringify({{httpStatus: resp.status, body: text.slice(0, 2000000)}});
+}})()
+"""
+        raw = self._run_browser_js(js, timeout=45)
+        envelope = self._parse_startup_rpc_envelope(raw, rpc_name)
+        if self._console_tab_needs_navigation(envelope):
+            app_list = (
+                "https://play.google.com/console/u/0/developers/"
+                f"{developer_id}/app-list"
+            )
+            self._ensure_opencli_on_play_console(app_list)
+            raw = self._run_browser_js(js, timeout=45)
+            envelope = self._parse_startup_rpc_envelope(raw, rpc_name)
+        if envelope.get("error"):
+            href = envelope.get("href")
+            extra = f"（当前页面 {href}）" if href else ""
+            raise PlayStoreClientError(f"{envelope['error']}{extra}")
+        status = envelope.get("httpStatus")
+        response_text = envelope.get("body")
+        if status != 200 or not isinstance(response_text, str):
+            detail = response_text if isinstance(response_text, str) else ""
+            http_status = status if isinstance(status, int) and not isinstance(status, bool) else None
+            raise PlayStoreClientError(
+                f"Play Console RPC {rpc_name} 失败，HTTP {status}，app-id {app_id}。"
+                f"{detail[:300]} 这不是空列表。",
+                status=http_status,
+            )
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise PlayStoreClientError(
+                f"Play Console RPC {rpc_name} 的响应体不是 JSON：{response_text[:200]}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise PlayStoreClientError(f"Play Console RPC {rpc_name} 的响应体不是 JSON 对象。")
+        return parsed
+
+    @classmethod
+    def _csl_targeting(cls, item: dict[int, list[Any]]) -> tuple[str | None, str | None]:
+        block = cls._proto_field(item, 3)
+        if not isinstance(block, dict):
+            return None, None
+        countries = block.get(1) or []
+        if countries and all(isinstance(code, str) and code for code in countries):
+            return "country", ",".join(countries)
+        slug = cls._proto_path(block, 3, 3)
+        if isinstance(slug, str) and slug:
+            return "url", slug
+        return None, None
+
+    @classmethod
+    def parse_custom_store_listings_startup(
+        cls,
+        response: dict[str, Any],
+        package_name: str,
+        developer_id: str,
+        app_id: str,
+    ) -> CustomStoreListingsResult:
+        """Parse a ``custom/overview:startupData`` JSON body. No browser calls."""
+        developer_id = cls._require_console_numeric_id(developer_id, "developer-id")
+        app_id = cls._require_console_numeric_id(app_id, "app-id")
+        decoded = cls._decode_startup_payload(
+            cls._startup_payload_b64(response, cls._CSL_STARTUP_TYPE, "CSL overview"),
+            "CSL overview",
+        )
+        unknown = set(decoded) - cls._CSL_PAGE_FIELDS
+        if unknown:
+            raise PlayStoreClientError(
+                f"CSL overview 出现未识别字段 {sorted(unknown)}。拒绝返回可能不完整的列表。"
+            )
+        if 1 not in decoded:
+            if not (set(decoded) & (cls._CSL_PAGE_FIELDS - {1})):
                 raise PlayStoreClientError(
-                    "Timed out waiting for experiments overview startupData response"
+                    "CSL overview 解码后没有列表字段，也没有页面级字段，无法确认数量为 0。"
                 )
+            return CustomStoreListingsResult(package_name=package_name, listings=[])
 
-            time.sleep(1)
+        items = decoded.get(1) or []
+        if not isinstance(items, list):
+            raise PlayStoreClientError("CSL overview 的列表字段不是重复消息。")
+        listings: list[CustomStoreListingSummary] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise PlayStoreClientError(f"CSL overview 第 {index} 条不是消息。")
+            listing_id_raw = cls._proto_path(item, 1, 3, 1)
+            name = cls._proto_field(item, 2)
+            if not isinstance(name, str) or not name:
+                raise PlayStoreClientError(
+                    f"CSL overview 第 {index} 条缺少内部名称。拒绝返回部分列表。"
+                )
+            if not isinstance(listing_id_raw, (str, int)) or isinstance(listing_id_raw, bool):
+                raise PlayStoreClientError(
+                    f"CSL overview 第 {index} 条（{name}）缺少 listing_id。拒绝返回部分列表。"
+                )
+            listing_id = str(listing_id_raw)
+            if not listing_id.isdigit():
+                raise PlayStoreClientError(
+                    f"CSL overview 第 {index} 条（{name}）的 listing_id 不是数字：{listing_id!r}。"
+                )
+            status_code = cls._proto_field(item, 5)
+            if status_code is not None and not isinstance(status_code, int):
+                raise PlayStoreClientError(
+                    f"CSL overview 第 {index} 条（{name}）的状态字段不是整数。"
+                )
+            targeting_type, targeting = cls._csl_targeting(item)
+            listings.append(
+                CustomStoreListingSummary(
+                    name=name,
+                    listing_id=listing_id,
+                    edit_url=(
+                        "https://play.google.com/console/u/0/developers/"
+                        f"{developer_id}/app/{app_id}/custom-store-listings/{listing_id}"
+                    ),
+                    status="live" if status_code == 1 else None,
+                    status_code=status_code if isinstance(status_code, int) else None,
+                    targeting_type=targeting_type,
+                    targeting=targeting,
+                )
+            )
+        ids = [item.listing_id for item in listings]
+        if len(ids) != len(set(ids)):
+            raise PlayStoreClientError("CSL overview 里 listing_id 有重复。拒绝返回这份列表。")
+        return CustomStoreListingsResult(package_name=package_name, listings=listings)
+
+    @classmethod
+    def _experiment_from_message(cls, exp_msg: dict[int, list[Any]], index: int) -> StoreListingExperimentSummary:
+        exp_id = ""
+        id_value = cls._proto_path(exp_msg, 1, 3, 1)
+        if isinstance(id_value, (str, int)) and not isinstance(id_value, bool):
+            exp_id = str(id_value)
+        name = cls._proto_field(exp_msg, 2)
+        if not exp_id or not isinstance(name, str) or not name:
+            raise PlayStoreClientError(
+                f"实验 overview 第 {index} 条缺少 experiment_id 或名称。拒绝返回部分列表。"
+            )
+        status = cls._proto_field(exp_msg, 3)
+        dimension = cls._proto_field(exp_msg, 4)
+        locale = cls._proto_path(exp_msg, 5, 4)
+        if locale is None:
+            locale = ""
+        if not isinstance(locale, str):
+            raise PlayStoreClientError(f"实验 overview 第 {index} 条（{name}）的语言字段不是字符串。")
+        if status is not None and not isinstance(status, int):
+            raise PlayStoreClientError(f"实验 overview 第 {index} 条（{name}）的状态字段不是整数。")
+        if dimension is not None and not isinstance(dimension, int):
+            raise PlayStoreClientError(f"实验 overview 第 {index} 条（{name}）的 dimension 字段不是整数。")
+        return StoreListingExperimentSummary(
+            experiment_id=exp_id,
+            name=name,
+            locale=locale,
+            dimension_type=dimension if isinstance(dimension, int) else None,
+            status_code=status if isinstance(status, int) else None,
+            start_timestamp=cls._proto_timestamp(cls._proto_field(exp_msg, 7)),
+            overview_field_18_timestamp=cls._proto_timestamp(cls._proto_field(exp_msg, 18)),
+            traffic_split=cls._proto_double(cls._proto_field(exp_msg, 10)),
+        )
+
+    @classmethod
+    def parse_store_listing_experiments_startup(
+        cls,
+        response: dict[str, Any],
+        package_name: str,
+    ) -> StoreListingExperimentsResult:
+        """Parse an experiments ``overview:startupData`` JSON body. No browser calls."""
+        decoded = cls._decode_startup_payload(
+            cls._startup_payload_b64(response, cls._EXPERIMENTS_STARTUP_DATA_TYPE, "实验 overview"),
+            "实验 overview",
+        )
+        unknown = set(decoded) - cls._EXPERIMENTS_PAGE_FIELDS
+        if unknown:
+            raise PlayStoreClientError(
+                f"实验 overview 出现未识别字段 {sorted(unknown)}。拒绝返回可能不完整的列表。"
+            )
+        if 1 not in decoded:
+            if not (set(decoded) & (cls._EXPERIMENTS_PAGE_FIELDS - {1})):
+                raise PlayStoreClientError(
+                    "实验 overview 解码后没有列表字段，也没有页面级字段，无法确认数量为 0。"
+                )
+            return StoreListingExperimentsResult(package_name=package_name, experiments=[])
+
+        items = decoded.get(1) or []
+        if not isinstance(items, list):
+            raise PlayStoreClientError("实验 overview 的列表字段不是重复消息。")
+        experiments = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise PlayStoreClientError(f"实验 overview 第 {index} 条不是消息。")
+            experiments.append(cls._experiment_from_message(item, index))
+        ids = [item.experiment_id for item in experiments]
+        if len(ids) != len(set(ids)):
+            raise PlayStoreClientError("实验 overview 里 experiment_id 有重复。拒绝返回这份列表。")
+        return StoreListingExperimentsResult(package_name=package_name, experiments=experiments)
 
     def get_custom_store_listings(
         self,
@@ -4546,14 +4928,10 @@ class PlayStoreClient:
         developer_id: str,
         app_id: str,
     ) -> CustomStoreListingsResult:
-        """List Custom Store Listings (CSL) for an app via Console UI scrape.
+        """List Custom Store Listings via the Play Console internal read RPC.
 
-        Requires OpenCLI with an active, logged-in Play Console browser
-        session. Returns name + edit URL only -- per-CSL content (title,
-        short/full description, targeting) requires opening each edit URL
-        individually; that page's fields are Angular Material inputs that
-        weren't reliably extractable via simple CSS selectors as of
-        2026-07-01, so per-CSL content scraping is not yet implemented here.
+        Requires OpenCLI session ``default`` already logged into Play Console.
+        Does not open each listing. Language is not in this overview payload.
 
         Args:
             package_name: App package name (display only).
@@ -4561,29 +4939,12 @@ class PlayStoreClient:
             app_id: Numeric app ID from Play Console URL.
 
         Returns:
-            CustomStoreListingsResult with each CSL's internal name and edit URL.
+            CustomStoreListingsResult. An empty list means the RPC confirmed zero CSLs.
         """
-        url = f"https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/store-listings"
-        self._run_opencli_cli(["open", url], timeout=45)
-        time.sleep(3)
-        state = self._run_opencli_cli(["state"], timeout=30)
-
-        pattern = re.compile(
-            r"Edit listing '([^']+)'[^>]*?custom-store-listings/(\d+)"
+        response = self._play_console_startup_rpc(self._CSL_STARTUP_RPC, developer_id, app_id)
+        return self.parse_custom_store_listings_startup(
+            response, package_name, developer_id, app_id
         )
-        seen: dict[str, str] = {}
-        for name, listing_id in pattern.findall(state):
-            seen[listing_id] = name
-
-        listings = [
-            CustomStoreListingSummary(
-                name=name,
-                listing_id=listing_id,
-                edit_url=f"https://play.google.com/console/u/0/developers/{developer_id}/app/{app_id}/custom-store-listings/{listing_id}",
-            )
-            for listing_id, name in seen.items()
-        ]
-        return CustomStoreListingsResult(package_name=package_name, listings=listings)
 
     def get_store_listing_experiments(
         self,
@@ -4591,15 +4952,11 @@ class PlayStoreClient:
         developer_id: str,
         app_id: str,
     ) -> StoreListingExperimentsResult:
-        """List Store Listing Experiments (A/B tests) for an app via Console RPC capture.
+        """List Store Listing Experiments via the Play Console internal read RPC.
 
-        Requires OpenCLI with an active, logged-in Play Console browser
-        session. Navigates to the experiments overview page, forces a
-        reload to trigger a fresh RPC call, captures that call's response
-        via OpenCLI network capture, and decodes the embedded protobuf
-        with a schema-less wire-format walker (see module docstring above
-        for caveats -- field semantics beyond experiment_id/name/locale are
-        inferred, not from an official schema).
+        The experiments overview URL currently redirects to the developer home,
+        so this does not scrape that page or wait on network capture. It POSTs
+        ``overview:startupData`` from whatever logged-in Play Console page is open.
 
         Args:
             package_name: App package name (display only).
@@ -4607,69 +4964,13 @@ class PlayStoreClient:
             app_id: Numeric app ID from Play Console URL.
 
         Returns:
-            StoreListingExperimentsResult with one entry per in-progress or
-            past experiment surfaced by the overview page.
+            StoreListingExperimentsResult. An empty list means the RPC confirmed
+            zero experiments.
         """
-        url = (
-            f"https://play.google.com/console/u/0/developers/{developer_id}"
-            f"/app/{app_id}/store-listing-experiments/overview"
+        response = self._play_console_startup_rpc(
+            self._EXPERIMENTS_STARTUP_RPC, developer_id, app_id
         )
-        self._run_opencli_cli(["open", url], timeout=45)
-        self._run_opencli_cli(["eval", "location.reload(); 'ok'"], timeout=30)
-
-        detail_key = (
-            "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
-            "storelistingexperiments/overview:startupData"
-        )
-        envelope = self._capture_store_listing_experiments_envelope(detail_key)
-        body_b64 = self._extract_store_listing_experiments_payload(envelope)
-
-        try:
-            decoded = self._decode_protobuf_generic(base64.b64decode(body_b64))
-        except Exception as exc:
-            raise PlayStoreClientError("Failed to decode experiments overview payload") from exc
-        experiments: list[StoreListingExperimentSummary] = []
-        for exp_msg in decoded.get(1, []):
-            if not isinstance(exp_msg, dict):
-                continue
-            exp_id = ""
-            id_wrapper = exp_msg.get(1)
-            if id_wrapper and isinstance(id_wrapper[0], dict):
-                id_str = id_wrapper[0].get(3)
-                if id_str and isinstance(id_str[0], dict):
-                    exp_id = str(id_str[0].get(1, [""])[0])
-            name = str(exp_msg.get(2, [""])[0])
-            status = exp_msg.get(3, [None])[0]
-            dimension = exp_msg.get(4, [None])[0]
-            locale = ""
-            locale_wrapper = exp_msg.get(5)
-            if locale_wrapper and isinstance(locale_wrapper[0], dict):
-                locale = str(locale_wrapper[0].get(4, [""])[0])
-            start_iso = None
-            ts_wrapper = exp_msg.get(7)
-            if ts_wrapper and isinstance(ts_wrapper[0], dict):
-                seconds = ts_wrapper[0].get(1, [None])[0]
-                if isinstance(seconds, int):
-                    from datetime import datetime, timezone
-                    start_iso = datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
-            traffic_split = None
-            split_bytes = exp_msg.get(10, [None])[0]
-            if isinstance(split_bytes, (bytes, bytearray)) and len(split_bytes) == 8:
-                import struct
-                traffic_split = struct.unpack("<d", split_bytes)[0]
-
-            experiments.append(
-                StoreListingExperimentSummary(
-                    experiment_id=exp_id,
-                    name=name,
-                    locale=locale,
-                    dimension_type=dimension if isinstance(dimension, int) else None,
-                    status=status if isinstance(status, int) else None,
-                    start_timestamp=start_iso,
-                    traffic_split=traffic_split,
-                )
-            )
-        return StoreListingExperimentsResult(package_name=package_name, experiments=experiments)
+        return self.parse_store_listing_experiments_startup(response, package_name)
 
     def get_experiment_report_raw(
         self,

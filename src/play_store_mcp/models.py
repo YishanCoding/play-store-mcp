@@ -569,16 +569,36 @@ class AcquisitionFunnelResult(BaseModel):
 
 
 class CustomStoreListingSummary(BaseModel):
-    """A single Custom Store Listing (CSL), read from the Play Console UI.
+    """A single Custom Store Listing (CSL) from the Play Console internal RPC.
 
-    CSL configuration (targeting, content, active status) has no Android
-    Publisher API surface -- this is scraped from the Console DOM via
-    OpenCLI, not the official REST API.
+    CSL configuration has no Android Publisher API surface. The list comes
+    from ``storelistings/custom/overview:startupData`` inside a logged-in
+    Play Console page, not from the DOM and not from the official REST API.
     """
 
-    name: str = Field(..., description="Internal CSL name/slug shown in Console (not shown to end users)")
+    name: str = Field(..., description="Internal CSL name shown in Console (not shown to end users)")
     listing_id: str = Field(..., description="Numeric CSL id used in the Console edit URL")
     edit_url: str = Field(..., description="Full Console URL to edit this CSL")
+    status: str | None = Field(
+        None,
+        description=(
+            "Console status label. 'live' is overview field 5 == 1. "
+            "Checked 2026-09-28 on "
+            "https://play.google.com/console/u/0/developers/6287361731679611511/app/4973755093875388037/store-listings/4832841715885421717 "
+            "(grim-reaper, listing_id 4832841715885421717): page title 'Store listing details', status line 'Live'. "
+            "The store listings table the same day showed 'Live' on every custom-listing row, and the overview "
+            "response for those rows was field 5 == 1. Other integers are not labeled."
+        ),
+    )
+    status_code: int | None = Field(None, description="Raw status enum from the overview payload")
+    targeting_type: str | None = Field(
+        None,
+        description="How the listing is targeted: 'url' (URL parameter) or 'country'",
+    )
+    targeting: str | None = Field(
+        None,
+        description="URL parameter value, or comma-separated country codes",
+    )
 
 
 class CustomStoreListingsResult(BaseModel):
@@ -589,22 +609,45 @@ class CustomStoreListingsResult(BaseModel):
 
 
 class StoreListingExperimentSummary(BaseModel):
-    """A single Store Listing Experiment (A/B test), decoded from Console RPC.
+    """A single Store Listing Experiment from the Play Console internal RPC.
 
-    Experiments have no Android Publisher API surface -- this is decoded
-    from an internal protobuf response captured via OpenCLI network
-    capture. Field semantics beyond experiment_id/name/locale are inferred
-    from the response shape, not from an official schema, and may be
-    wrong or incomplete for experiment types this wasn't tested against.
+    Experiments have no Android Publisher API surface. The list comes from
+    ``storelistingexperiments/overview:startupData``. Field numbers other
+    than experiment_id / name / locale were checked against one live
+    response and one saved fixture, not an official schema.
     """
 
     experiment_id: str = Field(..., description="Numeric experiment id")
     name: str = Field(..., description="Experiment display name (often encodes what's being tested)")
     locale: str = Field("", description="Locale the experiment is scoped to")
-    dimension_type: int | None = Field(None, description="Inferred asset-type enum (e.g. phone screenshots); unverified against an official schema")
-    status: int | None = Field(None, description="Inferred status enum (e.g. running); unverified against an official schema")
-    start_timestamp: str | None = Field(None, description="Inferred experiment start time (ISO), decoded from an embedded protobuf Timestamp")
-    traffic_split: float | None = Field(None, description="Inferred traffic split fraction for the variant arm")
+    dimension_type: int | None = Field(None, description="Asset-type enum from overview field 4; not an official schema name")
+    status_code: int | None = Field(
+        None,
+        description=(
+            "Raw status integer from overview field 3. "
+            "On 2026-09-28 the only overview row (JJB-100-Android-71-position, id 9063393730453672176) had field 3 == 1, "
+            "and its details page "
+            "https://play.google.com/console/u/0/developers/6287361731679611511/app/4973755093875388037/store-listings/0/experiments/9063393730453672176/details "
+            "showed the status line 'Running'. No other code appeared in that response, so this stays the raw integer."
+        ),
+    )
+    start_timestamp: str | None = Field(
+        None,
+        description=(
+            "Start time (ISO) from overview field 7, a protobuf Timestamp. "
+            "The same details page showed 'Started on Sep 22, 2026', which is the UTC date of field 7 "
+            "(2026-09-22T03:34:15Z on that response)."
+        ),
+    )
+    overview_field_18_timestamp: str | None = Field(
+        None,
+        description=(
+            "ISO time from overview field 18. Not an experiment end time. "
+            "The details page above showed status 'Running' and 'Started on Sep 22, 2026' and no end time. "
+            "On that response field 18 was 2026-09-22T03:56:31Z, about 22 minutes after field 7, with no matching UI label."
+        ),
+    )
+    traffic_split: float | None = Field(None, description="Variant traffic fraction from overview field 10 (fixed64 double)")
 
 
 class StoreListingExperimentsResult(BaseModel):

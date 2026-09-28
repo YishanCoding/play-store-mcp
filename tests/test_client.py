@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
@@ -34,121 +35,399 @@ class TestPlayStoreClientInit:
             client._get_service()
 
 
-class TestStoreListingExperiments:
-    """Test Play Console store listing experiments capture parsing."""
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        piece = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(piece | 0x80)
+        else:
+            out.append(piece)
+            return bytes(out)
 
-    DETAIL_KEY = (
-        "POST playconsoleapps-pa.clients6.google.com/v1/developers/apps/"
-        "storelistingexperiments/overview:startupData"
-    )
+
+def _proto_varint(field: int, value: int) -> bytes:
+    return _varint((field << 3) | 0) + _varint(value)
+
+
+def _proto_bytes(field: int, payload: bytes) -> bytes:
+    return _varint((field << 3) | 2) + _varint(len(payload)) + payload
+
+
+def _proto_str(field: int, value: str) -> bytes:
+    return _proto_bytes(field, value.encode())
+
+
+def _startup_envelope(type_url: str, payload: bytes) -> dict[str, Any]:
+    import base64
+
+    return {"1": {"1": type_url, "2": base64.b64encode(payload).decode()}}
+
+
+class TestStoreListingExperiments:
+    """Offline parser tests for the experiments overview RPC."""
+
     STARTUP_DATA_TYPE = PlayStoreClient._EXPERIMENTS_STARTUP_DATA_TYPE
+    # Desensitized regression fixture captured 2026-07-02. Ids below are the
+    # fixture's own experiment id, not a live account secret.
     LIVE_NONEMPTY_BODY_B64 = (
         "CpgBCjEKCgj31Jf57cXMoFcSCgiF3e2R/vyUg0UaFQoTNTYxMjQ0ODQ1MzE4ODcwMzczNSIAEhhUUlBHLXBob25lLUExQTctdnMtMzBvZmYYASACKiUKGgoKCPfUl/ntxcygVxIKCIXd7ZH+/JSDRRoAGAEiBWVuLVVTOgsIoaSp0QYQ0KHsV0gBUQAAAAAAAOA/YAJoAXADeAUgASgB"
     )
 
-    @patch("play_store_mcp.client.time.sleep")
-    def test_get_store_listing_experiments_decodes_nonempty_nested_body(
-        self,
-        _mock_sleep: MagicMock,
-        client: PlayStoreClient,
-    ) -> None:
-        """Regression fixture from the 2026-07-02 live JuJuBit Console response."""
-        listing = json.dumps({"entries": [{"key": self.DETAIL_KEY, "status": 200}]})
-        envelope = json.dumps(
-            {
-                "body": {
-                    "1": {
-                        "1": self.STARTUP_DATA_TYPE,
-                        "2": self.LIVE_NONEMPTY_BODY_B64,
-                    }
-                }
-            }
+    def test_parse_nonempty_fixture(self) -> None:
+        result = PlayStoreClient.parse_store_listing_experiments_startup(
+            {"1": {"1": self.STARTUP_DATA_TYPE, "2": self.LIVE_NONEMPTY_BODY_B64}},
+            package_name="com.example.app",
         )
-
-        with patch.object(
-            client,
-            "_run_opencli_cli",
-            side_effect=["", "ok", listing, envelope],
-        ):
-            result = client.get_store_listing_experiments(
-                package_name="com.vast.jujubit",
-                developer_id="6287361731679611511",
-                app_id="4973755093875388037",
-            )
-
         assert len(result.experiments) == 1
         experiment = result.experiments[0]
         assert experiment.experiment_id == "5612448453188703735"
         assert experiment.name == "TRPG-phone-A1A7-vs-30off"
         assert experiment.locale == "en-US"
-        assert experiment.status == 1
+        assert experiment.status_code == 1
         assert experiment.dimension_type == 2
         assert experiment.start_timestamp == "2026-06-11T06:13:53+00:00"
+        assert experiment.overview_field_18_timestamp is None
         assert experiment.traffic_split == 0.5
 
-    @patch("play_store_mcp.client.time.sleep")
-    def test_get_store_listing_experiments_polls_until_target_response(
-        self,
-        mock_sleep: MagicMock,
-        client: PlayStoreClient,
-    ) -> None:
-        """The RPC may arrive after the first network snapshot."""
-        empty_listing = json.dumps({"entries": []})
-        listing = json.dumps({"entries": [{"key": self.DETAIL_KEY, "status": 200}]})
-        envelope = json.dumps(
-            {
-                "body": {
-                    "1": {
-                        "1": self.STARTUP_DATA_TYPE,
-                        "2": self.LIVE_NONEMPTY_BODY_B64,
-                    }
-                }
-            }
+    def test_parse_confirmed_zero(self) -> None:
+        """Page fields 4 and 5 with no repeated experiment field is a real zero."""
+        result = PlayStoreClient.parse_store_listing_experiments_startup(
+            {"1": {"1": self.STARTUP_DATA_TYPE, "2": "IAEoAQ=="}},
+            package_name="com.example.app",
         )
-
-        with patch.object(
-            client,
-            "_run_opencli_cli",
-            side_effect=["", "ok", empty_listing, listing, envelope],
-        ):
-            result = client.get_store_listing_experiments(
-                package_name="com.vast.jujubit",
-                developer_id="6287361731679611511",
-                app_id="4973755093875388037",
-            )
-
-        assert len(result.experiments) == 1
-        mock_sleep.assert_called_once_with(1)
-
-    @patch("play_store_mcp.client.time.sleep")
-    def test_get_store_listing_experiments_keeps_legacy_empty_payload_path(
-        self,
-        _mock_sleep: MagicMock,
-        client: PlayStoreClient,
-    ) -> None:
-        """Legacy empty-state captures used body['2']; valid zero experiments stay empty."""
-        listing = json.dumps({"entries": [{"key": self.DETAIL_KEY, "status": 200}]})
-        envelope = json.dumps({"body": {"2": "IAEoAQ=="}})
-
-        with patch.object(
-            client,
-            "_run_opencli_cli",
-            side_effect=["", "ok", listing, envelope],
-        ):
-            result = client.get_store_listing_experiments(
-                package_name="com.example.app",
-                developer_id="123",
-                app_id="456",
-            )
-
         assert result.experiments == []
 
-    def test_missing_experiments_payload_raises_parse_error(self) -> None:
-        """Missing payload is distinct from confirmed zero experiments."""
-        with pytest.raises(PlayStoreClientError, match="did not contain"):
-            PlayStoreClient._extract_store_listing_experiments_payload(
-                {"body": {"1": {"1": self.STARTUP_DATA_TYPE}}}
+    def test_malformed_envelope_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="拒绝返回空列表"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                {"1": {"1": self.STARTUP_DATA_TYPE}},
+                package_name="com.example.app",
             )
+
+    def test_unrecognized_page_field_raises(self) -> None:
+        payload = _proto_varint(4, 1) + _proto_varint(9, 1)
+        with pytest.raises(PlayStoreClientError, match="未识别字段"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
+
+    def test_rpc_http_error_is_not_an_empty_list(self, client: PlayStoreClient) -> None:
+        raw = json.dumps(
+            {"httpStatus": 403, "body": '{"1":7,"2":"The caller does not have permission"}'}
+        )
+        with patch.object(client, "_run_browser_js", return_value=raw):
+            with pytest.raises(PlayStoreClientError, match="HTTP 403") as raised:
+                client.get_store_listing_experiments(
+                    package_name="com.example.app",
+                    developer_id="123",
+                    app_id="111",
+                )
+        assert raised.value.status == 403
+
+    def test_truncated_page_field_then_illegal_wire_raises(self) -> None:
+        payload = b"\x20\x01\x0e"
+        with pytest.raises(PlayStoreClientError, match="非法 wire type"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
+
+    def test_truncated_varint_raises(self) -> None:
+        payload = _proto_varint(4, 1) + b"\x80"
+        with pytest.raises(PlayStoreClientError, match="varint 被截断"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
+
+    def test_overlong_length_raises(self) -> None:
+        payload = _proto_varint(4, 1) + b"\x0a\x64\x01"
+        with pytest.raises(PlayStoreClientError, match="超出剩余字节"):
+            PlayStoreClient.parse_store_listing_experiments_startup(
+                _startup_envelope(self.STARTUP_DATA_TYPE, payload),
+                package_name="com.example.app",
+            )
+
+    def test_logged_out_browser_raises(self, client: PlayStoreClient) -> None:
+        raw = json.dumps({"error": "OpenCLI 浏览器未登录 Play Console"})
+        with patch.object(client, "_run_browser_js", return_value=raw):
+            with pytest.raises(PlayStoreClientError, match="未登录 Play Console"):
+                client.get_store_listing_experiments(
+                    package_name="com.example.app",
+                    developer_id="123",
+                    app_id="456",
+                )
+
+
+class TestCustomStoreListings:
+    """Offline parser tests for the CSL overview RPC."""
+
+    TYPE_URL = PlayStoreClient._CSL_STARTUP_TYPE
+    DEV = "100"
+    APP = "200"
+
+    def _listing(self, listing_id: str, name: str, *, countries: list[str] | None = None, slug: str | None = None, status: int = 1) -> bytes:
+        identity = _proto_bytes(
+            1,
+            _proto_bytes(1, _proto_str(1, self.DEV))
+            + _proto_bytes(2, _proto_str(1, self.APP))
+            + _proto_bytes(3, _proto_str(1, listing_id)),
+        )
+        targeting = b""
+        if countries is not None:
+            country_payload = b"".join(_proto_str(1, code) for code in countries)
+            targeting = _proto_bytes(3, country_payload)
+        elif slug is not None:
+            targeting = _proto_bytes(3, _proto_bytes(3, _proto_str(3, slug)))
+        return identity + _proto_str(2, name) + targeting + _proto_varint(5, status)
+
+    def test_parse_url_and_country_listings(self) -> None:
+        payload = _proto_bytes(1, self._listing("501", "fixture-url", slug="fixture-url"))
+        payload += _proto_bytes(1, self._listing("502", "fixture-country", countries=["US", "GB"], status=1))
+        payload += _proto_varint(6, 1)
+        result = PlayStoreClient.parse_custom_store_listings_startup(
+            _startup_envelope(self.TYPE_URL, payload),
+            package_name="com.example.app",
+            developer_id=self.DEV,
+            app_id=self.APP,
+        )
+        assert [item.listing_id for item in result.listings] == ["501", "502"]
+        url_listing, country_listing = result.listings
+        assert url_listing.name == "fixture-url"
+        assert url_listing.targeting_type == "url"
+        assert url_listing.targeting == "fixture-url"
+        assert url_listing.status == "live"
+        assert url_listing.status_code == 1
+        assert url_listing.edit_url.endswith("/custom-store-listings/501")
+        assert country_listing.targeting_type == "country"
+        assert country_listing.targeting == "US,GB"
+        assert len({item.listing_id for item in result.listings}) == 2
+
+    def test_parse_confirmed_zero(self) -> None:
+        payload = _proto_varint(6, 1)
+        result = PlayStoreClient.parse_custom_store_listings_startup(
+            _startup_envelope(self.TYPE_URL, payload),
+            package_name="com.example.app",
+            developer_id=self.DEV,
+            app_id=self.APP,
+        )
+        assert result.listings == []
+
+    def test_malformed_item_raises(self) -> None:
+        nameless = _proto_bytes(1, _proto_varint(5, 1)) + _proto_varint(6, 1)
+        with pytest.raises(PlayStoreClientError, match="缺少内部名称"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, nameless),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_empty_message_is_not_confirmed_zero(self) -> None:
+        # A one-byte tag with an illegal wire type must not decode as zero listings.
+        with pytest.raises(PlayStoreClientError, match="非法 wire type"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, b"\x0f"),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_illegal_wire_after_page_field_raises(self) -> None:
+        payload = b"\x30\x01\x0e"
+        with pytest.raises(PlayStoreClientError, match="非法 wire type"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_truncated_varint_raises(self) -> None:
+        payload = _proto_varint(6, 1) + b"\x80"
+        with pytest.raises(PlayStoreClientError, match="varint 被截断"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_overlong_length_raises(self) -> None:
+        payload = _proto_varint(6, 1) + b"\x0a\x64\x01"
+        with pytest.raises(PlayStoreClientError, match="超出剩余字节"):
+            PlayStoreClient.parse_custom_store_listings_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+
+    def test_short_fixed64_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="剩余字节不足"):
+            PlayStoreClient._decode_protobuf_generic(b"\x09\x01\x02")
+
+    def test_field_zero_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="字段号为 0"):
+            PlayStoreClient._decode_protobuf_generic(b"\x00\x01")
+
+    def _confirmed_zero_rpc(self) -> str:
+        body = json.dumps(_startup_envelope(self.TYPE_URL, _proto_varint(6, 1)))
+        return json.dumps({"httpStatus": 200, "body": body})
+
+    @staticmethod
+    def _elsewhere_rpc() -> str:
+        return json.dumps(
+            {"error": "OpenCLI 浏览器不在 Play Console 页面", "href": "https://example.com/"}
+        )
+
+    def _listing_ids_via_browser(self, client: PlayStoreClient, fake_js: Any) -> list[str]:
+        with (
+            patch.object(client, "_run_browser_js", side_effect=fake_js) as js,
+            patch.object(client, "_run_opencli_cli") as cli,
+            patch("play_store_mcp.client.time.sleep"),
+        ):
+            result = client.get_custom_store_listings(
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+        cli.assert_not_called()
+        scripts = [call.args[0] for call in js.call_args_list]
+        assert result.listings == []
+        return scripts
+
+    def test_already_on_play_console_does_not_navigate(self, client: PlayStoreClient) -> None:
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            assert "location.assign" not in js
+            assert "consoleProbe" not in js
+            return self._confirmed_zero_rpc()
+
+        scripts = self._listing_ids_via_browser(client, fake_js)
+        assert len(scripts) == 1
+        assert "location.assign" not in scripts[0]
+
+    def test_elsewhere_then_assign_and_poll_succeeds(self, client: PlayStoreClient) -> None:
+        app_list = "https://play.google.com/console/u/0/developers/100/app-list"
+        probes = {"n": 0}
+        assigned = {"ok": False}
+
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            if "location.assign" in js:
+                assert app_list in js
+                assigned["ok"] = True
+                return "ok"
+            if "consoleProbe" in js:
+                probes["n"] += 1
+                if probes["n"] == 1:
+                    return json.dumps(
+                        {
+                            "consoleProbe": 1,
+                            "href": "https://example.com/",
+                            "readyState": "complete",
+                            "hasSapisid": False,
+                        }
+                    )
+                assert assigned["ok"]
+                return json.dumps(
+                    {
+                        "consoleProbe": 1,
+                        "href": app_list,
+                        "readyState": "complete",
+                        "hasSapisid": True,
+                    }
+                )
+            if probes["n"] == 0:
+                return self._elsewhere_rpc()
+            return self._confirmed_zero_rpc()
+
+        scripts = self._listing_ids_via_browser(client, fake_js)
+        assert assigned["ok"]
+        assert probes["n"] >= 2
+        assert any("location.assign" in script for script in scripts)
+        assert sum("consoleProbe" in script for script in scripts) == probes["n"]
+
+    def test_navigation_timeout_raises_instead_of_empty_list(self, client: PlayStoreClient) -> None:
+        clock = {"t": 0.0}
+
+        def monotonic() -> float:
+            clock["t"] += 8.0
+            return clock["t"]
+
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            if "location.assign" in js:
+                raise subprocess.TimeoutExpired(cmd="opencli", timeout=timeout)
+            if "consoleProbe" in js:
+                return json.dumps(
+                    {
+                        "consoleProbe": 1,
+                        "href": "https://example.com/",
+                        "readyState": "complete",
+                        "hasSapisid": False,
+                    }
+                )
+            return self._elsewhere_rpc()
+
+        with (
+            patch.object(client, "_run_browser_js", side_effect=fake_js),
+            patch.object(client, "_run_opencli_cli") as cli,
+            patch("play_store_mcp.client.time.sleep"),
+            patch("play_store_mcp.client.time.monotonic", monotonic),
+            pytest.raises(PlayStoreClientError, match="不在 Play Console") as raised,
+        ):
+            client.get_custom_store_listings(
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+        cli.assert_not_called()
+        message = str(raised.value)
+        assert "example.com" in message
+        assert "空列表不会当作成功" in message
+
+    def test_navigation_timeout_without_login_cookie_raises(self, client: PlayStoreClient) -> None:
+        clock = {"t": 0.0}
+        app_list = "https://play.google.com/console/u/0/developers/100/app-list"
+
+        def monotonic() -> float:
+            clock["t"] += 8.0
+            return clock["t"]
+
+        def fake_js(js: str, timeout: int = 20) -> str:
+            assert timeout > 0
+            if "location.assign" in js:
+                return "ok"
+            if "consoleProbe" in js:
+                return json.dumps(
+                    {
+                        "consoleProbe": 1,
+                        "href": app_list,
+                        "readyState": "complete",
+                        "hasSapisid": False,
+                    }
+                )
+            return self._elsewhere_rpc()
+
+        with (
+            patch.object(client, "_run_browser_js", side_effect=fake_js),
+            patch.object(client, "_run_opencli_cli") as cli,
+            patch("play_store_mcp.client.time.sleep"),
+            patch("play_store_mcp.client.time.monotonic", monotonic),
+            pytest.raises(PlayStoreClientError, match="未登录 Play Console") as raised,
+        ):
+            client.get_custom_store_listings(
+                package_name="com.example.app",
+                developer_id=self.DEV,
+                app_id=self.APP,
+            )
+        cli.assert_not_called()
+        assert "没有 SAPISID" in str(raised.value)
 
 
 class TestGetReleases:
