@@ -1576,3 +1576,282 @@ class TestBrowserStats:
                     start_date="2024-01-01",
                     end_date="2024-01-31",
                 )
+
+
+def _proto_fixed64(field: int, payload: bytes) -> bytes:
+    return _varint((field << 3) | 1) + payload
+
+
+class TestExperimentReport:
+    """Offline parser tests for the experiment report RPC."""
+
+    TYPE_URL = PlayStoreClient._EXPERIMENT_REPORT_TYPE
+    EXP = "9063393730453672000"
+
+    def _reference(self) -> bytes:
+        return (
+            _proto_bytes(1, _proto_varint(1, 100))
+            + _proto_bytes(2, _proto_varint(1, 200))
+            + _proto_bytes(3, _proto_str(1, self.EXP))
+        )
+
+    def _variant(self, fraction: float, name: str | None) -> bytes:
+        import struct
+
+        body = _proto_bytes(2, _proto_varint(1, 11) + _proto_str(2, ""))
+        if name is not None:
+            body += _proto_str(3, name)
+        body += _proto_fixed64(4, struct.pack("<d", fraction))
+        return body
+
+    def _payload(self) -> bytes:
+        metadata = (
+            _proto_bytes(1, self._reference())
+            + _proto_str(2, "Fixture experiment")
+            + _proto_varint(3, 1)
+            + _proto_varint(4, 2)
+            + _proto_bytes(7, _proto_varint(1, 1790048055))
+        )
+        result = (
+            _proto_str(1, self.EXP)
+            + _proto_bytes(3, self._variant(0.34, None))
+            + _proto_bytes(3, self._variant(0.33, "Variant B"))
+            + _proto_bytes(4, _proto_varint(1, 1790048055))
+        )
+        image = _proto_str(2, "https://example.com/fixture-screenshot.png")
+        treatment = _proto_str(1, "Variant B") + _proto_bytes(6, _proto_bytes(1, image))
+        return (
+            _proto_bytes(2, result)
+            + _proto_bytes(4, metadata)
+            + _proto_bytes(5, treatment)
+            + _proto_varint(7, 1)
+            + _proto_varint(8, 1)
+        )
+
+    def test_parse_fixture(self) -> None:
+        result = PlayStoreClient.parse_experiment_report_startup(
+            _startup_envelope(self.TYPE_URL, self._payload()),
+            experiment_id=self.EXP,
+        )
+        assert result.experiment_id == self.EXP
+        assert result.name == "Fixture experiment"
+        assert result.status_code == 1
+        assert result.dimension_type == 2
+        assert result.start_timestamp == "2026-09-22T03:34:15+00:00"
+        assert [(item.name, item.audience_percent) for item in result.variants] == [
+            ("Current listing", 34),
+            ("Variant B", 33),
+        ]
+        assert result.image_urls == ["https://example.com/fixture-screenshot.png"]
+        assert any("Fixture experiment" in item for item in result.text_strings)
+
+    def test_missing_metadata_raises(self) -> None:
+        payload = _proto_varint(7, 1) + _proto_varint(8, 1)
+        with pytest.raises(PlayStoreClientError, match="缺少 metadata 或 result"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                experiment_id=self.EXP,
+            )
+
+    def test_damaged_protobuf_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="protobuf"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, b"\x80"),
+                experiment_id=self.EXP,
+            )
+
+    def test_report_outer_length_mismatch_raises(self) -> None:
+        # Complete valid report followed by a field claiming five missing bytes.
+        damaged = self._payload() + b"\x4a\x05\x00"
+        with pytest.raises(PlayStoreClientError, match="长度"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, damaged), experiment_id=self.EXP
+            )
+
+    def test_report_base64_invalid_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="protobuf 无法解码"):
+            PlayStoreClient.parse_experiment_report_startup(
+                {"1": {"1": self.TYPE_URL, "2": "%%%"}}, experiment_id=self.EXP
+            )
+
+    def test_missing_result_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="缺少 metadata 或 result"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, _proto_bytes(4, self._metadata())),
+                experiment_id=self.EXP,
+            )
+
+    def test_missing_metadata_only_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="缺少 metadata 或 result"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, _proto_bytes(2, self._named_result())),
+                experiment_id=self.EXP,
+            )
+
+    def test_report_id_mismatch_raises(self) -> None:
+        with pytest.raises(PlayStoreClientError, match="id 与请求不一致"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, self._payload()),
+                experiment_id="1",
+            )
+
+    def test_truncated_treatment_raises(self) -> None:
+        old = _proto_bytes(
+            5,
+            _proto_str(1, "Variant B")
+            + _proto_bytes(6, _proto_bytes(1, _proto_str(2, "https://example.com/fixture-screenshot.png"))),
+        )
+        payload = self._payload()
+        assert old in payload
+        with pytest.raises(PlayStoreClientError, match="treatment 不是消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload.replace(old, _proto_bytes(5, b"\x80"))),
+                experiment_id=self.EXP,
+            )
+
+    @pytest.mark.parametrize(
+        "damaged_media",
+        [
+            _proto_bytes(6, b"\x80"),
+            _proto_bytes(6, _proto_bytes(1, b"\x80")),
+        ],
+        ids=["asset-list", "asset"],
+    )
+    def test_truncated_nested_treatment_media_raises(self, damaged_media: bytes) -> None:
+        old = _proto_bytes(
+            5,
+            _proto_str(1, "Variant B")
+            + _proto_bytes(6, _proto_bytes(1, _proto_str(2, "https://example.com/fixture-screenshot.png"))),
+        )
+        payload = self._payload()
+        assert old in payload
+        damaged = _proto_bytes(5, _proto_str(1, "Variant B") + damaged_media)
+        with pytest.raises(PlayStoreClientError, match="无法解码的子消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload.replace(old, damaged)),
+                experiment_id=self.EXP,
+            )
+
+    def _damaged_subtree_payloads(self) -> dict[str, bytes]:
+        base, metadata, result = self._payload(), self._metadata(), self._named_result()
+        timestamp = _proto_bytes(7, _proto_varint(1, 1790048055))
+        variant = self._variant(0.33, "Variant B")
+        damaged_variant = variant.replace(_proto_bytes(2, b"\x08\x0b\x12\x00"), _proto_bytes(2, b"\x80"))
+        return {
+            "top9-image": base + _proto_bytes(9, _proto_bytes(6, _proto_bytes(1, b"\x80"))),
+            "metadata": base.replace(
+                _proto_bytes(4, metadata),
+                _proto_bytes(4, metadata.replace(
+                    timestamp, _proto_bytes(7, _proto_varint(1, 1790048055) + _proto_bytes(2, b"\x80"))
+                )),
+            ),
+            "result": base.replace(
+                _proto_bytes(2, result),
+                _proto_bytes(2, result.replace(
+                    _proto_bytes(4, _proto_varint(1, 1790048055)), _proto_bytes(4, b"\x80")
+                )),
+            ),
+            "variant": base.replace(
+                _proto_bytes(2, result),
+                _proto_bytes(2, result.replace(_proto_bytes(3, variant), _proto_bytes(3, damaged_variant))),
+            ),
+        }
+
+    @pytest.mark.parametrize("where", ["top9-image", "metadata", "result", "variant"])
+    def test_truncated_message_anywhere_raises(self, where: str) -> None:
+        payload = self._damaged_subtree_payloads()[where]
+        assert payload != self._payload()
+        with pytest.raises(PlayStoreClientError, match="无法解码的子消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                experiment_id=self.EXP,
+            )
+
+    def test_multiline_text_chunk_is_allowed(self) -> None:
+        # Real reports carry a multi-line prompt in field 9/3; it is text, not
+        # a damaged message.
+        text = "Describe your app.\nKeep it short.\n\tThanks"
+        payload = self._payload() + _proto_bytes(9, _proto_bytes(3, text.encode()))
+        report = PlayStoreClient.parse_experiment_report_startup(
+            _startup_envelope(self.TYPE_URL, payload),
+            experiment_id=self.EXP,
+        )
+        assert report.name == "Fixture experiment"
+
+    def _metadata(self) -> bytes:
+        return (
+            _proto_bytes(1, self._reference())
+            + _proto_str(2, "Fixture experiment")
+            + _proto_varint(3, 1)
+            + _proto_varint(4, 2)
+            + _proto_bytes(7, _proto_varint(1, 1790048055))
+        )
+
+    def _named_result(self) -> bytes:
+        return (
+            _proto_str(1, self.EXP)
+            + _proto_bytes(3, self._variant(0.34, None))
+            + _proto_bytes(3, self._variant(0.33, "Variant B"))
+            + _proto_bytes(4, _proto_varint(1, 1790048055))
+        )
+
+    def test_truncated_result_and_metadata_raise(self) -> None:
+        treatment = _proto_str(1, "Variant B") + _proto_bytes(
+            6, _proto_bytes(1, _proto_str(2, "https://example.com/fixture-screenshot.png"))
+        )
+        tail = _proto_bytes(5, treatment) + _proto_varint(7, 1) + _proto_varint(8, 1)
+        cases = (
+            _proto_bytes(2, b"\x80") + _proto_bytes(4, self._metadata()) + tail,
+            _proto_bytes(2, self._named_result()) + _proto_bytes(4, b"\x80") + tail,
+        )
+        for damaged in cases:
+            with pytest.raises(PlayStoreClientError, match="不是消息"):
+                PlayStoreClient.parse_experiment_report_startup(
+                    _startup_envelope(self.TYPE_URL, damaged),
+                    experiment_id=self.EXP,
+                )
+
+    def test_truncated_variant_raises(self) -> None:
+        result = _proto_str(1, self.EXP) + _proto_bytes(3, b"\x80")
+        payload = _proto_bytes(2, result) + _proto_bytes(4, self._metadata())
+        with pytest.raises(PlayStoreClientError, match="变体不是消息|无法解码的子消息"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, payload),
+                experiment_id=self.EXP,
+            )
+
+    def test_all_variants_unnamed_raises(self) -> None:
+        metadata = (
+            _proto_bytes(1, self._reference())
+            + _proto_str(2, "Fixture experiment")
+            + _proto_varint(3, 1)
+            + _proto_varint(4, 2)
+            + _proto_bytes(7, _proto_varint(1, 1790048055))
+        )
+        result = _proto_str(1, self.EXP) + _proto_bytes(3, self._variant(0.34, None))
+        with pytest.raises(PlayStoreClientError, match="所有变体都无名称"):
+            PlayStoreClient.parse_experiment_report_startup(
+                _startup_envelope(self.TYPE_URL, _proto_bytes(2, result) + _proto_bytes(4, metadata)),
+                experiment_id=self.EXP,
+            )
+
+    def test_audience_fraction_out_of_range_raises(self) -> None:
+        old = _proto_bytes(3, self._variant(0.34, None))
+        payload = self._payload()
+        assert old in payload
+        for fraction in (1.5, -0.1, float("nan"), float("inf")):
+            damaged = payload.replace(old, _proto_bytes(3, self._variant(fraction, None)))
+            with pytest.raises(PlayStoreClientError, match="受众占比无效"):
+                PlayStoreClient.parse_experiment_report_startup(
+                    _startup_envelope(self.TYPE_URL, damaged),
+                    experiment_id=self.EXP,
+                )
+
+    def test_non_numeric_experiment_id_raises(self, client: PlayStoreClient) -> None:
+        with pytest.raises(PlayStoreClientError, match="纯数字"):
+            client.get_experiment_report_raw(
+                package_name="com.example.app",
+                developer_id="100",
+                app_id="200",
+                experiment_id="abc",
+            )
